@@ -466,8 +466,21 @@ fn set_save_hotkey(vk_code: i32, ctrl: bool, shift: bool, alt: bool) -> Result<S
   }
 }
 
+fn cleanup_before_exit() {
+  let _ = stop_recording();
+  unsafe {
+    if obs_ffi::obs_initialized() {
+      obs_ffi::obs_shutdown();
+    }
+  }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+  use tauri::menu::{Menu, MenuItem};
+  use tauri::tray::TrayIconBuilder;
+  use tauri::{Manager, WindowEvent};
+
   tauri::Builder::default()
     .setup(|app| {
       if cfg!(debug_assertions) {
@@ -478,7 +491,40 @@ pub fn run() {
         )?;
       }
       let _ = APP_HANDLE.set(app.handle().clone());
+
+      let show_item = MenuItem::with_id(app, "show", "Mostrar Emberio", true, None::<&str>)?;
+      let quit_item = MenuItem::with_id(app, "quit", "Salir (corta la grabacion)", true, None::<&str>)?;
+      let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+      TrayIconBuilder::new()
+        .icon(app.default_window_icon().unwrap().clone())
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .tooltip("Emberio")
+        .on_menu_event(|app, event| match event.id.as_ref() {
+          "show" => {
+            if let Some(window) = app.get_webview_window("main") {
+              let _ = window.show();
+              let _ = window.set_focus();
+            }
+          }
+          "quit" => {
+            app.exit(0);
+          }
+          _ => {}
+        })
+        .build(app)?;
+
       Ok(())
+    })
+    .on_window_event(|window, event| {
+      // Cerrar la ventana (la X) la oculta en vez de matar el proceso --
+      // asi la grabacion sigue en pie con solo el hotkey, sin necesitar la
+      // ventana abierta. Salir de verdad es via el menu de la bandeja.
+      if let WindowEvent::CloseRequested { api, .. } = event {
+        api.prevent_close();
+        let _ = window.hide();
+      }
     })
     .invoke_handler(tauri::generate_handler![
       get_obs_version,
@@ -489,14 +535,8 @@ pub fn run() {
     ])
     .build(tauri::generate_context!())
     .expect("error while building tauri application")
-    .run(|_app_handle, event| {
-      if let tauri::RunEvent::ExitRequested { .. } = event {
-        let _ = stop_recording();
-        unsafe {
-          if obs_ffi::obs_initialized() {
-            obs_ffi::obs_shutdown();
-          }
-        }
-      }
+    .run(|_app_handle, event| match event {
+      tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => cleanup_before_exit(),
+      _ => {}
     });
 }
