@@ -1,0 +1,4 @@
+[submodule "vendor/obs-studio"]
+	path = vendor/obs-studio
+	url = https://github.com/halconrandom/obs-studio-emberio.git
+	branch = dev-halcon

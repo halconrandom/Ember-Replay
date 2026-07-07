@@ -16,10 +16,10 @@ fn setup_libobs() {
     // OJO: evitar .canonicalize() aca -- en Windows devuelve rutas con
     // prefijo "\\?\" (verbatim) que rompen la resolucion de includes
     // relativos de clang (ej. "util/c99defs.h" dejaba de encontrarse).
-    let emberio_root = manifest_dir.join("../../Emberio");
+    let emberio_root = manifest_dir.join("../vendor/obs-studio");
     assert!(
         emberio_root.join("libobs/obs.h").exists(),
-        "No se encontro ../../Emberio junto a Emberio-app (el vendor de OBS con el build ya compilado)"
+        "No se encontro vendor/obs-studio (submodule). Corre: git submodule update --init"
     );
 
     let libobs_dir = emberio_root.join("libobs");
