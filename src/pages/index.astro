@@ -9,9 +9,24 @@
 		<link rel="icon" href="/favicon.ico" />
 		<meta name="viewport" content="width=device-width" />
 		<meta name="generator" content={Astro.generator} />
-		<title>Astro</title>
+		<title>Emberio</title>
 	</head>
 	<body>
-		<h1>Astro</h1>
+		<h1>Emberio</h1>
+		<button id="check-obs">Probar libobs</button>
+		<p id="obs-version"></p>
+		<script>
+			import { invoke } from "@tauri-apps/api/core";
+
+			document.getElementById("check-obs")?.addEventListener("click", async () => {
+				const el = document.getElementById("obs-version")!;
+				try {
+					const version = await invoke<string>("get_obs_version");
+					el.textContent = `libobs version: ${version}`;
+				} catch (err) {
+					el.textContent = `Error: ${err}`;
+				}
+			});
+		</script>
 	</body>
 </html>
