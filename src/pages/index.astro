@@ -19,6 +19,10 @@
 		<p id="obs-init-status"></p>
 		<button id="start-capture">Armar captura (monitor + audio)</button>
 		<p id="start-capture-status"></p>
+		<button id="setup-output">Arrancar replay buffer (60s)</button>
+		<p id="setup-output-status"></p>
+		<button id="save-clip">Guardar clip</button>
+		<p id="save-clip-status"></p>
 		<script>
 			import { invoke } from "@tauri-apps/api/core";
 
@@ -49,6 +53,28 @@
 				try {
 					const status = await invoke<string>("obs_start_capture");
 					el.textContent = status;
+				} catch (err) {
+					el.textContent = `Error: ${err}`;
+				}
+			});
+
+			document.getElementById("setup-output")?.addEventListener("click", async () => {
+				const el = document.getElementById("setup-output-status")!;
+				el.textContent = "Arrancando replay buffer...";
+				try {
+					const status = await invoke<string>("obs_setup_output");
+					el.textContent = status;
+				} catch (err) {
+					el.textContent = `Error: ${err}`;
+				}
+			});
+
+			document.getElementById("save-clip")?.addEventListener("click", async () => {
+				const el = document.getElementById("save-clip-status")!;
+				el.textContent = "Guardando clip...";
+				try {
+					const path = await invoke<string>("obs_save_clip");
+					el.textContent = `Clip guardado: ${path}`;
 				} catch (err) {
 					el.textContent = `Error: ${err}`;
 				}

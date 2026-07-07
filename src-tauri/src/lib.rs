@@ -20,6 +20,62 @@ struct CaptureState {
 
 static CAPTURE_STATE: Mutex<Option<CaptureState>> = Mutex::new(None);
 
+struct OutputState {
+  output: RawPtr<obs_ffi::obs_output_t>,
+  video_encoder: RawPtr<obs_ffi::obs_encoder_t>,
+  audio_encoder: RawPtr<obs_ffi::obs_encoder_t>,
+}
+
+static OUTPUT_STATE: Mutex<Option<OutputState>> = Mutex::new(None);
+
+/// Llama a un proc sin argumentos (ej. "save") sobre el proc_handler de un
+/// output. `calldata_t` es un struct simple (stack/size/capacity/fixed) --
+/// lo zero-inicializamos a mano en vez de usar `calldata_init` porque esa
+/// es una funcion `static inline` de header y bindgen no genera simbolo
+/// linkeable para esas.
+unsafe fn call_proc_no_args(output: *mut obs_ffi::obs_output_t, name: &str) -> bool {
+  let ph = obs_ffi::obs_output_get_proc_handler(output);
+  if ph.is_null() {
+    return false;
+  }
+  let mut cd: obs_ffi::calldata_t = std::mem::zeroed();
+  let name_c = CString::new(name).unwrap();
+  let ok = obs_ffi::proc_handler_call(ph, name_c.as_ptr(), &mut cd as *mut _);
+  if !cd.stack.is_null() {
+    obs_ffi::bfree(cd.stack as *mut _);
+  }
+  ok
+}
+
+/// Idem pero devuelve el string de salida "path" (usado por
+/// "get_last_replay"). Devuelve None si el proc no puso nada (replay
+/// buffer todavia muxeando el clip a disco).
+unsafe fn call_proc_get_string(output: *mut obs_ffi::obs_output_t, name: &str, out_field: &str) -> Option<String> {
+  let ph = obs_ffi::obs_output_get_proc_handler(output);
+  if ph.is_null() {
+    return None;
+  }
+  let mut cd: obs_ffi::calldata_t = std::mem::zeroed();
+  let name_c = CString::new(name).unwrap();
+  obs_ffi::proc_handler_call(ph, name_c.as_ptr(), &mut cd as *mut _);
+
+  let field_c = CString::new(out_field).unwrap();
+  let mut str_ptr: *const std::os::raw::c_char = std::ptr::null();
+  let has_value = obs_ffi::calldata_get_string(&cd as *const _, field_c.as_ptr(), &mut str_ptr as *mut _);
+
+  let result = if has_value && !str_ptr.is_null() {
+    let s = CStr::from_ptr(str_ptr).to_string_lossy().into_owned();
+    if s.is_empty() { None } else { Some(s) }
+  } else {
+    None
+  };
+
+  if !cd.stack.is_null() {
+    obs_ffi::bfree(cd.stack as *mut _);
+  }
+  result
+}
+
 #[tauri::command]
 fn get_obs_version() -> String {
   unsafe {
@@ -180,6 +236,131 @@ fn obs_start_capture() -> Result<String, String> {
   }
 }
 
+/// Paso 3: crear encoders (NVENC h264 + AAC), armar el output "replay_buffer"
+/// (buffer circular de los ultimos N segundos ya encodeados) y arrancarlo.
+/// Requiere que obs_start_capture ya haya corrido (necesita la escena activa
+/// en el canal 0 para tener algo que encodear).
+#[tauri::command]
+fn obs_setup_output() -> Result<String, String> {
+  unsafe {
+    if CAPTURE_STATE.lock().unwrap().is_none() {
+      return Err("Llama a obs_start_capture primero".into());
+    }
+    if OUTPUT_STATE.lock().unwrap().is_some() {
+      return Ok("El output ya estaba armado".into());
+    }
+
+    let venc_id = CString::new("obs_nvenc_h264_tex").unwrap();
+    let venc_name = CString::new("Emberio Video Encoder").unwrap();
+    let video_encoder =
+      obs_ffi::obs_video_encoder_create(venc_id.as_ptr(), venc_name.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
+    if video_encoder.is_null() {
+      return Err("obs_video_encoder_create('obs_nvenc_h264_tex') devolvio null (¿GPU sin NVENC?)".into());
+    }
+    obs_ffi::obs_encoder_set_video(video_encoder, obs_ffi::obs_get_video());
+
+    let aenc_id = CString::new("ffmpeg_aac").unwrap();
+    let aenc_name = CString::new("Emberio Audio Encoder").unwrap();
+    let audio_encoder = obs_ffi::obs_audio_encoder_create(
+      aenc_id.as_ptr(),
+      aenc_name.as_ptr(),
+      std::ptr::null_mut(),
+      0,
+      std::ptr::null_mut(),
+    );
+    if audio_encoder.is_null() {
+      obs_ffi::obs_encoder_release(video_encoder);
+      return Err("obs_audio_encoder_create('ffmpeg_aac') devolvio null".into());
+    }
+    obs_ffi::obs_encoder_set_audio(audio_encoder, obs_ffi::obs_get_audio());
+
+    let clips_dir = app_dir().join("clips");
+    std::fs::create_dir_all(&clips_dir).map_err(|e| format!("no se pudo crear la carpeta de clips: {e}"))?;
+
+    let settings = obs_ffi::obs_data_create();
+    let dir_c = CString::new(clips_dir.to_string_lossy().replace('\\', "/")).unwrap();
+    let dir_key = CString::new("directory").unwrap();
+    obs_ffi::obs_data_set_string(settings, dir_key.as_ptr(), dir_c.as_ptr());
+    let fmt_key = CString::new("format").unwrap();
+    let fmt_val = CString::new("emberio-clip-%CCYY-%MM-%DD-%hh-%mm-%ss").unwrap();
+    obs_ffi::obs_data_set_string(settings, fmt_key.as_ptr(), fmt_val.as_ptr());
+    let ext_key = CString::new("extension").unwrap();
+    let ext_val = CString::new("mp4").unwrap();
+    obs_ffi::obs_data_set_string(settings, ext_key.as_ptr(), ext_val.as_ptr());
+    let max_time_key = CString::new("max_time_sec").unwrap();
+    obs_ffi::obs_data_set_int(settings, max_time_key.as_ptr(), 60);
+    let max_size_key = CString::new("max_size_mb").unwrap();
+    obs_ffi::obs_data_set_int(settings, max_size_key.as_ptr(), 1000);
+
+    let output_id = CString::new("replay_buffer").unwrap();
+    let output_name = CString::new("Emberio Replay Buffer").unwrap();
+    let output = obs_ffi::obs_output_create(output_id.as_ptr(), output_name.as_ptr(), settings, std::ptr::null_mut());
+    obs_ffi::obs_data_release(settings);
+    if output.is_null() {
+      obs_ffi::obs_encoder_release(video_encoder);
+      obs_ffi::obs_encoder_release(audio_encoder);
+      return Err("obs_output_create('replay_buffer') devolvio null".into());
+    }
+
+    obs_ffi::obs_output_set_video_encoder(output, video_encoder);
+    obs_ffi::obs_output_set_audio_encoder(output, audio_encoder, 0);
+
+    let started = obs_ffi::obs_output_start(output);
+    if !started {
+      let err_ptr = obs_ffi::obs_output_get_last_error(output);
+      let err = if err_ptr.is_null() {
+        "razon desconocida".to_string()
+      } else {
+        CStr::from_ptr(err_ptr).to_string_lossy().into_owned()
+      };
+      return Err(format!("obs_output_start fallo: {err}"));
+    }
+
+    *OUTPUT_STATE.lock().unwrap() = Some(OutputState {
+      output: RawPtr(output),
+      video_encoder: RawPtr(video_encoder),
+      audio_encoder: RawPtr(audio_encoder),
+    });
+
+    Ok(format!(
+      "Replay buffer arrancado. Guarda en: {}",
+      clips_dir.to_string_lossy()
+    ))
+  }
+}
+
+/// Paso 4: guardar el clip (ultimos N segundos bufferizados). El guardado
+/// real es asincrono (un thread interno remuxea a disco), asi que
+/// disparamos "save" y esperamos a que "get_last_replay" devuelva una ruta.
+#[tauri::command]
+async fn obs_save_clip() -> Result<String, String> {
+  // Envuelto en RawPtr (Send+Sync a mano) porque un *mut crudo no es Send,
+  // y este valor queda "vivo" del otro lado de un .await.
+  let output_ptr: RawPtr<obs_ffi::obs_output_t> = {
+    let guard = OUTPUT_STATE.lock().unwrap();
+    match &*guard {
+      Some(state) => RawPtr(state.output.0),
+      None => return Err("Llama a obs_setup_output primero".into()),
+    }
+  };
+
+  unsafe {
+    if !call_proc_no_args(output_ptr.0, "save") {
+      return Err("No se pudo llamar al proc 'save'".into());
+    }
+  }
+
+  for _ in 0..50 {
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let path = unsafe { call_proc_get_string(output_ptr.0, "get_last_replay", "path") };
+    if let Some(path) = path {
+      return Ok(path);
+    }
+  }
+
+  Err("Timeout esperando que se guarde el clip (5s)".into())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
@@ -193,7 +374,13 @@ pub fn run() {
       }
       Ok(())
     })
-    .invoke_handler(tauri::generate_handler![get_obs_version, obs_init, obs_start_capture])
+    .invoke_handler(tauri::generate_handler![
+      get_obs_version,
+      obs_init,
+      obs_start_capture,
+      obs_setup_output,
+      obs_save_clip
+    ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
 }
