@@ -1,3 +1,4 @@
+mod config;
 mod obs_ffi;
 
 use std::ffi::{c_void, CStr, CString};
@@ -30,8 +31,24 @@ static CAPTURE_STATE: Mutex<Option<CaptureState>> = Mutex::new(None);
 static OUTPUT_STATE: Mutex<Option<OutputState>> = Mutex::new(None);
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 static SAVE_HOTKEY_ID: Mutex<Option<obs_ffi::obs_hotkey_id>> = Mutex::new(None);
+static CONFIG: Mutex<Option<config::EmberioConfig>> = Mutex::new(None);
 
 const DEFAULT_HOTKEY_VK_F9: i32 = 0x78; // VK_F9
+
+fn with_config<R>(f: impl FnOnce(&mut config::EmberioConfig) -> R) -> R {
+  let mut guard = CONFIG.lock().unwrap();
+  if guard.is_none() {
+    *guard = Some(config::EmberioConfig::default());
+  }
+  f(guard.as_mut().unwrap())
+}
+
+fn persist_config() {
+  if let Some(app) = APP_HANDLE.get() {
+    let cfg = CONFIG.lock().unwrap().clone().unwrap_or_default();
+    config::save(app, &cfg);
+  }
+}
 
 fn app_dir() -> PathBuf {
   std::env::current_exe()
@@ -206,7 +223,10 @@ unsafe fn ensure_output_started(clip_seconds: i64) -> Result<PathBuf, String> {
     let guard = OUTPUT_STATE.lock().unwrap();
     if let Some(state) = &*guard {
       let _ = state.max_time_sec; // ya armado; ignoramos clip_seconds nuevo (hay que stop_recording primero)
-      return Ok(app_dir().join("clips"));
+      let clips_dir = with_config(|c| c.clips_dir.clone())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| app_dir().join("clips"));
+      return Ok(clips_dir);
     }
   }
 
@@ -229,7 +249,9 @@ unsafe fn ensure_output_started(clip_seconds: i64) -> Result<PathBuf, String> {
   }
   obs_ffi::obs_encoder_set_audio(audio_encoder, obs_ffi::obs_get_audio());
 
-  let clips_dir = app_dir().join("clips");
+  let clips_dir = with_config(|c| c.clips_dir.clone())
+    .map(PathBuf::from)
+    .unwrap_or_else(|| app_dir().join("clips"));
   std::fs::create_dir_all(&clips_dir).map_err(|e| format!("no se pudo crear la carpeta de clips: {e}"))?;
 
   let settings = obs_ffi::obs_data_create();
@@ -314,9 +336,27 @@ unsafe fn ensure_save_hotkey_registered() -> obs_ffi::obs_hotkey_id {
     std::ptr::null_mut(),
   );
 
+  let saved = with_config(|c| c.hotkey);
+  let (vk_code, modifiers) = match saved {
+    Some(h) => {
+      let mut m: u32 = 0;
+      if h.ctrl {
+        m |= obs_ffi::obs_interaction_flags_INTERACT_CONTROL_KEY as u32;
+      }
+      if h.shift {
+        m |= obs_ffi::obs_interaction_flags_INTERACT_SHIFT_KEY as u32;
+      }
+      if h.alt {
+        m |= obs_ffi::obs_interaction_flags_INTERACT_ALT_KEY as u32;
+      }
+      (h.vk_code, m)
+    }
+    None => (DEFAULT_HOTKEY_VK_F9, 0),
+  };
+
   let mut combo = obs_ffi::obs_key_combination {
-    modifiers: 0,
-    key: obs_ffi::obs_key_from_virtual_key(DEFAULT_HOTKEY_VK_F9),
+    modifiers,
+    key: obs_ffi::obs_key_from_virtual_key(vk_code),
   };
   obs_ffi::obs_hotkey_load_bindings(id, &mut combo as *mut _, 1);
 
@@ -392,6 +432,9 @@ fn start_recording(clip_seconds: i64) -> Result<String, String> {
     let clips_dir = ensure_output_started(clip_seconds)?;
     ensure_save_hotkey_registered();
 
+    with_config(|c| c.clip_seconds = clip_seconds);
+    persist_config();
+
     Ok(format!(
       "Grabando (buffer de {clip_seconds}s). Los clips se guardan en: {}",
       clips_dir.to_string_lossy()
@@ -455,6 +498,9 @@ fn set_save_hotkey(vk_code: i32, ctrl: bool, shift: bool, alt: bool) -> Result<S
     let mut combo = obs_ffi::obs_key_combination { modifiers, key };
     obs_ffi::obs_hotkey_load_bindings(id, &mut combo as *mut _, 1);
 
+    with_config(|c| c.hotkey = Some(config::HotkeyConfig { vk_code, ctrl, shift, alt }));
+    persist_config();
+
     let combo_desc = format!(
       "{}{}{}vk={vk_code}",
       if ctrl { "Ctrl+" } else { "" },
@@ -464,6 +510,23 @@ fn set_save_hotkey(vk_code: i32, ctrl: bool, shift: bool, alt: bool) -> Result<S
 
     Ok(format!("Hotkey de guardado ahora es: {combo_desc}"))
   }
+}
+
+/// Cambia donde se guardan los clips. Si ya estas grabando, el output ya
+/// armado sigue usando el directorio viejo -- hay que stop_recording +
+/// start_recording de nuevo para que tome el cambio.
+#[tauri::command]
+fn set_clips_dir(dir: String) -> Result<String, String> {
+  let path = PathBuf::from(&dir);
+  std::fs::create_dir_all(&path).map_err(|e| format!("no se pudo usar esa carpeta: {e}"))?;
+  with_config(|c| c.clips_dir = Some(dir.clone()));
+  persist_config();
+  Ok(format!("Los clips nuevos se van a guardar en: {dir}"))
+}
+
+#[tauri::command]
+fn get_config() -> config::EmberioConfig {
+  with_config(|c| c.clone())
 }
 
 fn cleanup_before_exit() {
@@ -482,6 +545,7 @@ pub fn run() {
   use tauri::{Manager, WindowEvent};
 
   tauri::Builder::default()
+    .plugin(tauri_plugin_dialog::init())
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(
@@ -491,6 +555,7 @@ pub fn run() {
         )?;
       }
       let _ = APP_HANDLE.set(app.handle().clone());
+      *CONFIG.lock().unwrap() = Some(config::load(app.handle()));
 
       let show_item = MenuItem::with_id(app, "show", "Mostrar Emberio", true, None::<&str>)?;
       let quit_item = MenuItem::with_id(app, "quit", "Salir (corta la grabacion)", true, None::<&str>)?;
@@ -531,7 +596,9 @@ pub fn run() {
       start_recording,
       stop_recording,
       save_clip_now,
-      set_save_hotkey
+      set_save_hotkey,
+      set_clips_dir,
+      get_config
     ])
     .build(tauri::generate_context!())
     .expect("error while building tauri application")

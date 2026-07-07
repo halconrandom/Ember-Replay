@@ -32,14 +32,63 @@
 			<p id="hotkey-status">Apreta el boton y despues la tecla que quieras usar.</p>
 		</section>
 
+		<section>
+			<button id="pick-clips-dir">Elegir carpeta de clips...</button>
+			<p id="clips-dir-status"></p>
+		</section>
+
 		<script>
 			import { invoke } from "@tauri-apps/api/core";
 			import { listen } from "@tauri-apps/api/event";
+			import { open } from "@tauri-apps/plugin-dialog";
+
+			interface HotkeyConfig {
+				vk_code: number;
+				ctrl: boolean;
+				shift: boolean;
+				alt: boolean;
+			}
+
+			interface EmberioConfig {
+				clip_seconds: number;
+				clips_dir: string | null;
+				hotkey: HotkeyConfig | null;
+			}
 
 			function setText(id: string, text: string) {
 				const el = document.getElementById(id);
 				if (el) el.textContent = text;
 			}
+
+			async function loadConfig() {
+				const config = await invoke<EmberioConfig>("get_config");
+
+				const secondsInput = document.getElementById("clip-seconds") as HTMLInputElement;
+				secondsInput.value = String(config.clip_seconds);
+
+				setText("clips-dir-status", config.clips_dir ? `Carpeta actual: ${config.clips_dir}` : "Usando la carpeta por defecto (clips/ junto al programa).");
+
+				if (config.hotkey) {
+					const h = config.hotkey;
+					const combo = `${h.ctrl ? "Ctrl+" : ""}${h.shift ? "Shift+" : ""}${h.alt ? "Alt+" : ""}vk=${h.vk_code}`;
+					setText("hotkey-status", `Hotkey guardado: ${combo}`);
+				}
+			}
+
+			loadConfig();
+
+			document.getElementById("pick-clips-dir")?.addEventListener("click", async () => {
+				const dir = await open({ directory: true, multiple: false, title: "Elegir carpeta para guardar los clips" });
+				if (!dir) return;
+
+				setText("clips-dir-status", "Guardando...");
+				try {
+					const status = await invoke<string>("set_clips_dir", { dir });
+					setText("clips-dir-status", status);
+				} catch (err) {
+					setText("clips-dir-status", `Error: ${err}`);
+				}
+			});
 
 			document.getElementById("start-recording")?.addEventListener("click", async () => {
 				const secondsInput = document.getElementById("clip-seconds") as HTMLInputElement;
