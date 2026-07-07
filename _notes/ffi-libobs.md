@@ -6,16 +6,30 @@ Prerrequisitos instalados en esta maquina (via winget): `Kitware.CMake` y
 
 ## Como esta armado
 
-- `src-tauri/build.rs`: corre `bindgen` contra `../../Emberio/libobs/obs.h`
-  (el vendor de OBS, ver `Emberio/_notes/*.md`), linkea contra
-  `Emberio/build_x64/libobs/RelWithDebInfo/obs.lib`, y copia a
-  `target/<profile>/`:
-  - `Emberio/build_x64/rundir/RelWithDebInfo/bin/64bit/*` (obs.dll y las
-    libobs-*.dll)
-  - `Emberio/build_x64/rundir/RelWithDebInfo/obs-plugins/64bit/` completo
-  - `Emberio/build_x64/rundir/RelWithDebInfo/data/` completo
-  - `Emberio/.deps/obs-deps-*-x64/bin/*` (runtime de ffmpeg/x264/curl/zlib
-    que `obs.dll` necesita cargar en tiempo de arranque)
+- `vendor/obs-studio` es un **git submodule** apuntando a
+  `github.com/halconrandom/obs-studio-emberio` (fork propio de
+  obsproject/obs-studio), rama `dev-halcon`. Ahi viven los 5 archivos
+  parcheados (ver `_notes` de ese repo) para recortar el build a
+  captura+audio+replay buffer. `origin` en ese submodule = nuestro fork,
+  `upstream` = `obsproject/obs-studio` (para traer actualizaciones con
+  `git fetch upstream` cuando haga falta).
+- `src-tauri/build.rs`: corre `bindgen` contra `vendor/obs-studio/libobs/obs.h`,
+  linkea contra `vendor/obs-studio/build_x64/libobs/RelWithDebInfo/obs.lib`, y
+  copia a `target/<profile>/`:
+  - `vendor/obs-studio/build_x64/rundir/RelWithDebInfo/bin/64bit/*` (obs.dll y
+    las libobs-*.dll)
+  - `vendor/obs-studio/build_x64/rundir/RelWithDebInfo/obs-plugins/64bit/`
+    completo
+  - `vendor/obs-studio/build_x64/rundir/RelWithDebInfo/data/` completo
+  - `vendor/obs-studio/.deps/obs-deps-*-x64/bin/*` (runtime de
+    ffmpeg/x264/curl/zlib que `obs.dll` necesita cargar en tiempo de
+    arranque)
+
+  Importante: `build_x64/` y `.deps/` son artefactos de build generados
+  localmente (no vienen del submodule ni se commitean) — hay que compilar
+  `vendor/obs-studio` una vez siguiendo los pasos de
+  `vendor/obs-studio/_notes/build-minimo-logrado.md` antes de que
+  `cargo build` funcione en un checkout nuevo.
 - `src-tauri/src/obs_ffi.rs`: `include!` de los bindings generados
   (`obs_bindings.rs` en `OUT_DIR`), namespace separado del resto del app.
 - Comando de prueba: `get_obs_version` en `lib.rs`, invocado desde un boton
