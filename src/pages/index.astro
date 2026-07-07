@@ -13,71 +13,90 @@
 	</head>
 	<body>
 		<h1>Emberio</h1>
-		<button id="check-obs">Probar libobs</button>
-		<p id="obs-version"></p>
-		<button id="init-obs">Inicializar libobs (video+audio+modulos)</button>
-		<p id="obs-init-status"></p>
-		<button id="start-capture">Armar captura (monitor + audio)</button>
-		<p id="start-capture-status"></p>
-		<button id="setup-output">Arrancar replay buffer (60s)</button>
-		<p id="setup-output-status"></p>
-		<button id="save-clip">Guardar clip</button>
-		<p id="save-clip-status"></p>
+
+		<section>
+			<label for="clip-seconds">Segundos a clipear:</label>
+			<input type="number" id="clip-seconds" value="60" min="5" max="1200" />
+			<button id="start-recording">Empezar a grabar</button>
+			<button id="stop-recording">Detener grabacion</button>
+			<p id="recording-status"></p>
+		</section>
+
+		<section>
+			<button id="save-clip">Guardar clip ahora</button>
+			<p id="save-clip-status"></p>
+		</section>
+
+		<section>
+			<button id="change-hotkey">Cambiar hotkey de guardado (por defecto F9)</button>
+			<p id="hotkey-status">Apreta el boton y despues la tecla que quieras usar.</p>
+		</section>
+
 		<script>
 			import { invoke } from "@tauri-apps/api/core";
+			import { listen } from "@tauri-apps/api/event";
 
-			document.getElementById("check-obs")?.addEventListener("click", async () => {
-				const el = document.getElementById("obs-version")!;
+			function setText(id: string, text: string) {
+				const el = document.getElementById(id);
+				if (el) el.textContent = text;
+			}
+
+			document.getElementById("start-recording")?.addEventListener("click", async () => {
+				const secondsInput = document.getElementById("clip-seconds") as HTMLInputElement;
+				const seconds = Number(secondsInput.value) || 60;
+				setText("recording-status", "Arrancando...");
 				try {
-					const version = await invoke<string>("get_obs_version");
-					el.textContent = `libobs version: ${version}`;
+					const status = await invoke<string>("start_recording", { clipSeconds: seconds });
+					setText("recording-status", status);
 				} catch (err) {
-					el.textContent = `Error: ${err}`;
+					setText("recording-status", `Error: ${err}`);
 				}
 			});
 
-			document.getElementById("init-obs")?.addEventListener("click", async () => {
-				const el = document.getElementById("obs-init-status")!;
-				el.textContent = "Inicializando...";
+			document.getElementById("stop-recording")?.addEventListener("click", async () => {
+				setText("recording-status", "Deteniendo...");
 				try {
-					const status = await invoke<string>("obs_init");
-					el.textContent = status;
+					const status = await invoke<string>("stop_recording");
+					setText("recording-status", status);
 				} catch (err) {
-					el.textContent = `Error: ${err}`;
-				}
-			});
-
-			document.getElementById("start-capture")?.addEventListener("click", async () => {
-				const el = document.getElementById("start-capture-status")!;
-				el.textContent = "Armando captura...";
-				try {
-					const status = await invoke<string>("obs_start_capture");
-					el.textContent = status;
-				} catch (err) {
-					el.textContent = `Error: ${err}`;
-				}
-			});
-
-			document.getElementById("setup-output")?.addEventListener("click", async () => {
-				const el = document.getElementById("setup-output-status")!;
-				el.textContent = "Arrancando replay buffer...";
-				try {
-					const status = await invoke<string>("obs_setup_output");
-					el.textContent = status;
-				} catch (err) {
-					el.textContent = `Error: ${err}`;
+					setText("recording-status", `Error: ${err}`);
 				}
 			});
 
 			document.getElementById("save-clip")?.addEventListener("click", async () => {
-				const el = document.getElementById("save-clip-status")!;
-				el.textContent = "Guardando clip...";
-				try {
-					const path = await invoke<string>("obs_save_clip");
-					el.textContent = `Clip guardado: ${path}`;
-				} catch (err) {
-					el.textContent = `Error: ${err}`;
-				}
+				setText("save-clip-status", "Guardando...");
+				await invoke("save_clip_now");
+			});
+
+			listen<string>("clip-saved", (event) => {
+				setText("save-clip-status", `Clip guardado: ${event.payload}`);
+			});
+
+			listen<string>("clip-save-error", (event) => {
+				setText("save-clip-status", `Error al guardar: ${event.payload}`);
+			});
+
+			document.getElementById("change-hotkey")?.addEventListener("click", () => {
+				setText("hotkey-status", "Apreta la tecla que queres usar...");
+
+				const onKeyDown = async (e: KeyboardEvent) => {
+					e.preventDefault();
+					window.removeEventListener("keydown", onKeyDown, true);
+
+					try {
+						const status = await invoke<string>("set_save_hotkey", {
+							vkCode: e.keyCode,
+							ctrl: e.ctrlKey,
+							shift: e.shiftKey,
+							alt: e.altKey,
+						});
+						setText("hotkey-status", status);
+					} catch (err) {
+						setText("hotkey-status", `Error: ${err}`);
+					}
+				};
+
+				window.addEventListener("keydown", onKeyDown, true);
 			});
 		</script>
 	</body>

@@ -45,6 +45,7 @@ fn setup_libobs() {
         .allowlist_function("signal_handler_.*")
         .allowlist_function("proc_handler_.*")
         .allowlist_function("bfree")
+        .allowlist_type("obs_interaction_flags")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("No se pudieron generar los bindings de libobs");
