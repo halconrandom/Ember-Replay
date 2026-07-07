@@ -10,21 +10,90 @@ pub struct HotkeyConfig {
   pub alt: bool,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioSourceKind {
+  /// wasapi_output_capture -- audio de salida de un dispositivo (desktop,
+  /// o un output virtual de Voicemeeter, etc).
+  Output,
+  /// wasapi_input_capture -- entrada (microfono, o un input virtual).
+  Input,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AudioSourceConfig {
+  pub kind: AudioSourceKind,
+  pub device_id: String,
+  pub label: String,
+  /// Multiplicador lineal de volumen (1.0 = 100%, 0.0 = silencio total,
+  /// hasta 2.0 = +100% de boost). Independiente de `muted`, igual que en
+  /// el mixer de OBS.
+  #[serde(default = "default_volume")]
+  pub volume: f32,
+  #[serde(default)]
+  pub muted: bool,
+}
+
+fn default_volume() -> f32 {
+  1.0
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct EmberioConfig {
   #[serde(default = "default_clip_seconds")]
   pub clip_seconds: i64,
   pub clips_dir: Option<String>,
   pub hotkey: Option<HotkeyConfig>,
+  pub monitor_id: Option<String>,
+  #[serde(default = "default_audio_sources")]
+  pub audio_sources: Vec<AudioSourceConfig>,
+  #[serde(default = "default_theme")]
+  pub theme: String,
+  /// "original" (misma resolucion que el monitor principal) o "720p".
+  #[serde(default = "default_resolution")]
+  pub resolution: String,
+  #[serde(default = "default_fps")]
+  pub fps: i64,
 }
 
 fn default_clip_seconds() -> i64 {
   60
 }
 
+fn default_theme() -> String {
+  "dark".to_string()
+}
+
+fn default_resolution() -> String {
+  "original".to_string()
+}
+
+fn default_fps() -> i64 {
+  60
+}
+
+fn default_audio_sources() -> Vec<AudioSourceConfig> {
+  vec![AudioSourceConfig {
+    kind: AudioSourceKind::Output,
+    device_id: "default".to_string(),
+    label: "Audio de escritorio".to_string(),
+    volume: default_volume(),
+    muted: false,
+  }]
+}
+
 impl Default for EmberioConfig {
   fn default() -> Self {
-    Self { clip_seconds: default_clip_seconds(), clips_dir: None, hotkey: None }
+    Self {
+      clip_seconds: default_clip_seconds(),
+      clips_dir: None,
+      hotkey: None,
+      monitor_id: None,
+      audio_sources: default_audio_sources(),
+      theme: default_theme(),
+      resolution: default_resolution(),
+      fps: default_fps(),
+    }
   }
 }
 
@@ -42,10 +111,7 @@ fn config_path(app: &AppHandle) -> PathBuf {
 
 pub fn load(app: &AppHandle) -> EmberioConfig {
   let path = config_path(app);
-  std::fs::read_to_string(&path)
-    .ok()
-    .and_then(|s| serde_json::from_str(&s).ok())
-    .unwrap_or_else(|| EmberioConfig { clip_seconds: default_clip_seconds(), clips_dir: None, hotkey: None })
+  std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
 pub fn save(app: &AppHandle, config: &EmberioConfig) {

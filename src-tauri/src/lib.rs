@@ -17,7 +17,12 @@ unsafe impl<T> Sync for RawPtr<T> {}
 struct CaptureState {
   scene: RawPtr<obs_ffi::obs_scene_t>,
   monitor_source: RawPtr<obs_ffi::obs_source_t>,
-  audio_source: RawPtr<obs_ffi::obs_source_t>,
+  /// Una fuente de audio por cada entrada en config.audio_sources, en el
+  /// mismo orden -- ocupan los canales de salida 1..=N.
+  audio_sources: Vec<RawPtr<obs_ffi::obs_source_t>>,
+  /// Un volmeter por fuente de audio (mismo orden/indice) -- alimenta
+  /// AUDIO_LEVELS para los medidores en vivo del mixer.
+  audio_volmeters: Vec<RawPtr<obs_ffi::obs_volmeter_t>>,
 }
 
 struct OutputState {
@@ -32,8 +37,33 @@ static OUTPUT_STATE: Mutex<Option<OutputState>> = Mutex::new(None);
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 static SAVE_HOTKEY_ID: Mutex<Option<obs_ffi::obs_hotkey_id>> = Mutex::new(None);
 static CONFIG: Mutex<Option<config::EmberioConfig>> = Mutex::new(None);
+/// Nivel de audio en vivo (0.0..=1.0) por indice de fuente, actualizado por
+/// los callbacks de volmeter y emitido periodicamente al frontend.
+static AUDIO_LEVELS: Mutex<Vec<f32>> = Mutex::new(Vec::new());
 
 const DEFAULT_HOTKEY_VK_F9: i32 = 0x78; // VK_F9
+
+#[link(name = "user32")]
+extern "system" {
+  fn GetSystemMetrics(n_index: i32) -> i32;
+}
+const SM_CXSCREEN: i32 = 0;
+const SM_CYSCREEN: i32 = 1;
+
+/// Resolucion del monitor principal, usada como canvas base de libobs.
+/// No depende de que los modulos ya esten cargados (a diferencia de
+/// list_monitors), asi que la podemos usar antes de obs_load_all_modules.
+fn primary_monitor_size() -> (u32, u32) {
+  unsafe {
+    let w = GetSystemMetrics(SM_CXSCREEN);
+    let h = GetSystemMetrics(SM_CYSCREEN);
+    if w > 0 && h > 0 {
+      (w as u32, h as u32)
+    } else {
+      (1920, 1080)
+    }
+  }
+}
 
 fn with_config<R>(f: impl FnOnce(&mut config::EmberioConfig) -> R) -> R {
   let mut guard = CONFIG.lock().unwrap();
@@ -111,10 +141,112 @@ unsafe fn call_proc_get_string(output: *mut obs_ffi::obs_output_t, name: &str, o
 }
 
 // ---------------------------------------------------------------------------
+// Introspeccion de propiedades de fuentes (para poblar los dropdowns de
+// monitor/dispositivo de audio -- el mismo mecanismo que usa la UI real de
+// OBS: cada fuente expone una lista con las opciones disponibles en ese
+// momento via su callback get_properties, sin necesidad de una instancia).
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct PropertyOption {
+  name: String,
+  value: String,
+}
+
+unsafe fn list_property_options(source_id: &str, property_key: &str) -> Vec<PropertyOption> {
+  let id_c = CString::new(source_id).unwrap();
+  let props = obs_ffi::obs_get_source_properties(id_c.as_ptr());
+  if props.is_null() {
+    return vec![];
+  }
+
+  let key_c = CString::new(property_key).unwrap();
+  let prop = obs_ffi::obs_properties_get(props, key_c.as_ptr());
+
+  let mut result = Vec::new();
+  if !prop.is_null() {
+    let count = obs_ffi::obs_property_list_item_count(prop);
+    for i in 0..count {
+      let name_ptr = obs_ffi::obs_property_list_item_name(prop, i);
+      let value_ptr = obs_ffi::obs_property_list_item_string(prop, i);
+      let name = if name_ptr.is_null() {
+        String::new()
+      } else {
+        CStr::from_ptr(name_ptr).to_string_lossy().into_owned()
+      };
+      let value = if value_ptr.is_null() {
+        String::new()
+      } else {
+        CStr::from_ptr(value_ptr).to_string_lossy().into_owned()
+      };
+      result.push(PropertyOption { name, value });
+    }
+  }
+
+  obs_ffi::obs_properties_destroy(props);
+  result
+}
+
+// ---------------------------------------------------------------------------
 // Inicializacion (idempotente)
 // ---------------------------------------------------------------------------
 
-unsafe fn ensure_obs_initialized() -> Result<(), String> {
+/// Aplica (o reaplica) la config de video actual. Se puede llamar de nuevo
+/// despues de stop_recording (ahi obs_video_active() vuelve a false) para
+/// que un cambio de resolucion/FPS tome efecto en la proxima grabacion, sin
+/// tener que reiniciar libobs entero.
+unsafe fn apply_video_settings() -> Result<(), String> {
+  let (resolution, fps) = with_config(|c| (c.resolution.clone(), c.fps));
+  let (base_w, base_h) = primary_monitor_size();
+
+  let (out_w, out_h) = if resolution == "720p" && base_h > 720 {
+    let scale = 720.0 / base_h as f64;
+    (((base_w as f64 * scale) as u32) & !1, 720u32)
+  } else {
+    (base_w, base_h)
+  };
+
+  let scale_type = if (out_w, out_h) == (base_w, base_h) {
+    obs_ffi::obs_scale_type_OBS_SCALE_DISABLE
+  } else {
+    obs_ffi::obs_scale_type_OBS_SCALE_BICUBIC
+  };
+
+  let graphics_module = CString::new("libobs-d3d11").unwrap();
+  let mut ovi = obs_ffi::obs_video_info {
+    graphics_module: graphics_module.as_ptr(),
+    fps_num: fps as u32,
+    fps_den: 1,
+    base_width: base_w,
+    base_height: base_h,
+    output_width: out_w,
+    output_height: out_h,
+    output_format: obs_ffi::video_format_VIDEO_FORMAT_NV12,
+    adapter: 0,
+    gpu_conversion: true,
+    colorspace: obs_ffi::video_colorspace_VIDEO_CS_DEFAULT,
+    range: obs_ffi::video_range_type_VIDEO_RANGE_DEFAULT,
+    scale_type,
+  };
+  let video_result = obs_ffi::obs_reset_video(&mut ovi as *mut _);
+  if video_result != obs_ffi::OBS_VIDEO_SUCCESS as i32 {
+    return Err(format!("obs_reset_video fallo, codigo {video_result}"));
+  }
+
+  let oai = obs_ffi::obs_audio_info {
+    samples_per_sec: 48000,
+    speakers: obs_ffi::speaker_layout_SPEAKERS_STEREO,
+  };
+  if !obs_ffi::obs_reset_audio(&oai as *const _) {
+    return Err("obs_reset_audio fallo".into());
+  }
+
+  Ok(())
+}
+
+/// Arranca libobs y carga los plugins. Corre una sola vez por proceso (a
+/// diferencia de apply_video_settings, que se puede repetir).
+unsafe fn ensure_obs_platform_initialized() -> Result<(), String> {
   if obs_ffi::obs_initialized() {
     return Ok(());
   }
@@ -135,6 +267,14 @@ unsafe fn ensure_obs_initialized() -> Result<(), String> {
     return Err("obs_startup fallo".into());
   }
 
+  // Importante: reset_video/reset_audio tienen que correr ANTES de cargar
+  // los modulos. win-capture decide en su obs_module_load() si registra la
+  // fuente de monitor moderna (DXGI, "monitor_id" string) o la vieja (GDI,
+  // "monitor" int) mirando si ya hay un dispositivo D3D11 activo
+  // (gs_get_device_type()) -- si todavia no hay contexto de graficos, cae
+  // siempre al modo legacy GDI aunque la GPU soporte DXGI perfectamente.
+  apply_video_settings()?;
+
   let data_root = base.join("../../data").to_string_lossy().replace('\\', "/");
   let bin_path = CString::new(base.join("obs-plugins/64bit").to_string_lossy().replace('\\', "/")).unwrap();
   let data_path = CString::new(format!("{data_root}/obs-plugins/%module%")).unwrap();
@@ -142,42 +282,57 @@ unsafe fn ensure_obs_initialized() -> Result<(), String> {
   obs_ffi::obs_load_all_modules();
   obs_ffi::obs_post_load_modules();
 
-  let graphics_module = CString::new("libobs-d3d11").unwrap();
-  let mut ovi = obs_ffi::obs_video_info {
-    graphics_module: graphics_module.as_ptr(),
-    fps_num: 30,
-    fps_den: 1,
-    base_width: 1920,
-    base_height: 1080,
-    output_width: 1920,
-    output_height: 1080,
-    output_format: obs_ffi::video_format_VIDEO_FORMAT_NV12,
-    adapter: 0,
-    gpu_conversion: true,
-    colorspace: obs_ffi::video_colorspace_VIDEO_CS_DEFAULT,
-    range: obs_ffi::video_range_type_VIDEO_RANGE_DEFAULT,
-    scale_type: obs_ffi::obs_scale_type_OBS_SCALE_DISABLE,
-  };
-  let video_result = obs_ffi::obs_reset_video(&mut ovi as *mut _);
-  if video_result != obs_ffi::OBS_VIDEO_SUCCESS as i32 {
-    return Err(format!("obs_reset_video fallo, codigo {video_result}"));
-  }
-
-  let oai = obs_ffi::obs_audio_info {
-    samples_per_sec: 48000,
-    speakers: obs_ffi::speaker_layout_SPEAKERS_STEREO,
-  };
-  if !obs_ffi::obs_reset_audio(&oai as *const _) {
-    return Err("obs_reset_audio fallo".into());
-  }
-
   Ok(())
+}
+
+/// Crea un `obs_data_t*` con un solo campo string (o null si `value` es None,
+/// para dejar que la fuente use su propio default).
+unsafe fn single_string_settings(key: &str, value: &Option<String>) -> *mut obs_ffi::obs_data_t {
+  match value {
+    Some(v) => {
+      let settings = obs_ffi::obs_data_create();
+      let key_c = CString::new(key).unwrap();
+      let val_c = CString::new(v.as_str()).unwrap();
+      obs_ffi::obs_data_set_string(settings, key_c.as_ptr(), val_c.as_ptr());
+      settings
+    }
+    None => std::ptr::null_mut(),
+  }
+}
+
+/// Maximo de fuentes de audio simultaneas (canales de salida 1..=5; el canal
+/// 0 es el video). Alcanza y sobra para escenarios tipo Voicemeeter con
+/// varios buses virtuales.
+const MAX_AUDIO_SOURCES: usize = 5;
+
+/// Convierte el dB que reporta el volmeter de OBS a un 0.0..=1.0 para la UI
+/// (rango estandar de VU meter: -60dB = silencio, 0dB = full scale).
+extern "C" fn volmeter_callback(
+  param: *mut c_void,
+  _magnitude: *const f32,
+  peak: *const f32,
+  _input_peak: *const f32,
+) {
+  let index = param as usize;
+  if peak.is_null() {
+    return;
+  }
+  let db = unsafe { *peak };
+  let normalized = if db.is_finite() { ((db + 60.0) / 60.0).clamp(0.0, 1.0) } else { 0.0 };
+  if let Ok(mut levels) = AUDIO_LEVELS.lock() {
+    if index < levels.len() {
+      levels[index] = normalized;
+    }
+  }
 }
 
 unsafe fn ensure_capture_started() -> Result<(), String> {
   if CAPTURE_STATE.lock().unwrap().is_some() {
     return Ok(());
   }
+
+  let monitor_id_cfg = with_config(|c| c.monitor_id.clone());
+  let audio_sources_cfg = with_config(|c| c.audio_sources.clone());
 
   let scene_name = CString::new("Emberio Scene").unwrap();
   let scene = obs_ffi::obs_scene_create(scene_name.as_ptr());
@@ -188,31 +343,60 @@ unsafe fn ensure_capture_started() -> Result<(), String> {
 
   let monitor_id = CString::new("monitor_capture").unwrap();
   let monitor_name = CString::new("Monitor").unwrap();
+  let monitor_settings = single_string_settings("monitor_id", &monitor_id_cfg);
   let monitor_source =
-    obs_ffi::obs_source_create(monitor_id.as_ptr(), monitor_name.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
+    obs_ffi::obs_source_create(monitor_id.as_ptr(), monitor_name.as_ptr(), monitor_settings, std::ptr::null_mut());
   if monitor_source.is_null() {
     obs_ffi::obs_scene_release(scene);
     return Err("obs_source_create('monitor_capture') devolvio null".into());
   }
   obs_ffi::obs_scene_add(scene, monitor_source);
 
-  let audio_id = CString::new("wasapi_output_capture").unwrap();
-  let audio_name = CString::new("Audio de escritorio").unwrap();
-  let audio_source =
-    obs_ffi::obs_source_create(audio_id.as_ptr(), audio_name.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
-  if audio_source.is_null() {
-    obs_ffi::obs_source_release(monitor_source);
-    obs_ffi::obs_scene_release(scene);
-    return Err("obs_source_create('wasapi_output_capture') devolvio null".into());
+  let mut audio_sources = Vec::new();
+  for entry in audio_sources_cfg.iter().take(MAX_AUDIO_SOURCES) {
+    let source_id = match entry.kind {
+      config::AudioSourceKind::Output => "wasapi_output_capture",
+      config::AudioSourceKind::Input => "wasapi_input_capture",
+    };
+    let id_c = CString::new(source_id).unwrap();
+    let name_c = CString::new(entry.label.as_str()).unwrap();
+    let settings = single_string_settings("device_id", &Some(entry.device_id.clone()));
+    let source = obs_ffi::obs_source_create(id_c.as_ptr(), name_c.as_ptr(), settings, std::ptr::null_mut());
+    if source.is_null() {
+      for s in &audio_sources {
+        obs_ffi::obs_source_release(*s);
+      }
+      obs_ffi::obs_source_release(monitor_source);
+      obs_ffi::obs_scene_release(scene);
+      return Err(format!("obs_source_create('{source_id}') devolvio null para '{}'", entry.label));
+    }
+    obs_ffi::obs_source_set_volume(source, entry.volume);
+    obs_ffi::obs_source_set_muted(source, entry.muted);
+    audio_sources.push(source);
   }
 
   obs_ffi::obs_set_output_source(0, scene_source);
-  obs_ffi::obs_set_output_source(1, audio_source);
+  for (i, source) in audio_sources.iter().enumerate() {
+    obs_ffi::obs_set_output_source((i + 1) as u32, *source);
+  }
+
+  // Un volmeter por fuente para los medidores en vivo del mixer.
+  *AUDIO_LEVELS.lock().unwrap() = vec![0.0; audio_sources.len()];
+  let mut audio_volmeters = Vec::new();
+  for (i, source) in audio_sources.iter().enumerate() {
+    let volmeter = obs_ffi::obs_volmeter_create(obs_ffi::obs_fader_type_OBS_FADER_LOG);
+    if !volmeter.is_null() {
+      obs_ffi::obs_volmeter_attach_source(volmeter, *source);
+      obs_ffi::obs_volmeter_add_callback(volmeter, Some(volmeter_callback), i as *mut c_void);
+    }
+    audio_volmeters.push(volmeter);
+  }
 
   *CAPTURE_STATE.lock().unwrap() = Some(CaptureState {
     scene: RawPtr(scene),
     monitor_source: RawPtr(monitor_source),
-    audio_source: RawPtr(audio_source),
+    audio_sources: audio_sources.into_iter().map(RawPtr).collect(),
+    audio_volmeters: audio_volmeters.into_iter().map(RawPtr).collect(),
   });
 
   Ok(())
@@ -427,7 +611,12 @@ fn get_obs_version() -> String {
 #[tauri::command]
 fn start_recording(clip_seconds: i64) -> Result<String, String> {
   unsafe {
-    ensure_obs_initialized()?;
+    ensure_obs_platform_initialized()?;
+    // Solo reaplicamos video/FPS/resolucion si no hay una grabacion activa
+    // ya (obs_reset_video falla si el video esta en uso).
+    if OUTPUT_STATE.lock().unwrap().is_none() {
+      apply_video_settings()?;
+    }
     ensure_capture_started()?;
     let clips_dir = ensure_output_started(clip_seconds)?;
     ensure_save_hotkey_registered();
@@ -455,11 +644,24 @@ fn stop_recording() -> Result<String, String> {
     }
     if let Some(state) = CAPTURE_STATE.lock().unwrap().take() {
       obs_ffi::obs_set_output_source(0, std::ptr::null_mut());
-      obs_ffi::obs_set_output_source(1, std::ptr::null_mut());
+      for i in 1..=MAX_AUDIO_SOURCES {
+        obs_ffi::obs_set_output_source(i as u32, std::ptr::null_mut());
+      }
+      for volmeter in state.audio_volmeters {
+        if !volmeter.0.is_null() {
+          // obs_volmeter_destroy libera tambien los callbacks registrados,
+          // no hace falta remove_callback aparte.
+          obs_ffi::obs_volmeter_detach_source(volmeter.0);
+          obs_ffi::obs_volmeter_destroy(volmeter.0);
+        }
+      }
       obs_ffi::obs_source_release(state.monitor_source.0);
-      obs_ffi::obs_source_release(state.audio_source.0);
+      for source in state.audio_sources {
+        obs_ffi::obs_source_release(source.0);
+      }
       obs_ffi::obs_scene_release(state.scene.0);
     }
+    AUDIO_LEVELS.lock().unwrap().clear();
   }
   Ok("Grabacion detenida y recursos liberados".into())
 }
@@ -529,6 +731,148 @@ fn get_config() -> config::EmberioConfig {
   with_config(|c| c.clone())
 }
 
+/// Lista de pantallas disponibles (mismo mecanismo que usa la ventana de
+/// configuracion de OBS: EnumDisplayMonitors corre en vivo al pedir las
+/// propiedades de "monitor_capture").
+#[tauri::command]
+fn list_monitors() -> Result<Vec<PropertyOption>, String> {
+  unsafe {
+    ensure_obs_platform_initialized()?;
+    Ok(list_property_options("monitor_capture", "monitor_id"))
+  }
+}
+
+#[tauri::command]
+fn list_audio_output_devices() -> Result<Vec<PropertyOption>, String> {
+  unsafe {
+    ensure_obs_platform_initialized()?;
+    Ok(list_property_options("wasapi_output_capture", "device_id"))
+  }
+}
+
+#[tauri::command]
+fn list_audio_input_devices() -> Result<Vec<PropertyOption>, String> {
+  unsafe {
+    ensure_obs_platform_initialized()?;
+    Ok(list_property_options("wasapi_input_capture", "device_id"))
+  }
+}
+
+/// Elegir que pantalla capturar. Si ya estas grabando, hace falta
+/// stop_recording + start_recording de nuevo para que tome el cambio (la
+/// fuente ya creada no se puede reapuntar en caliente sin reconfigurarla).
+#[tauri::command]
+fn set_monitor(id: String) -> Result<String, String> {
+  with_config(|c| c.monitor_id = Some(id));
+  persist_config();
+  Ok("Pantalla guardada. Si ya estabas grabando, deteni y volve a empezar para que tome el cambio.".into())
+}
+
+/// Agrega una fuente de audio a la lista (hasta MAX_AUDIO_SOURCES). Pensado
+/// para setups tipo Voicemeeter con varios buses virtuales que se quieren
+/// capturar todos a la vez, cada uno en su propio canal.
+#[tauri::command]
+fn add_audio_source(kind: String, device_id: String, label: String) -> Result<Vec<config::AudioSourceConfig>, String> {
+  let kind = match kind.as_str() {
+    "output" => config::AudioSourceKind::Output,
+    "input" => config::AudioSourceKind::Input,
+    other => return Err(format!("kind invalido: {other} (usa 'output' o 'input')")),
+  };
+
+  let sources = with_config(|c| {
+    if c.audio_sources.len() >= MAX_AUDIO_SOURCES {
+      return None;
+    }
+    c.audio_sources.push(config::AudioSourceConfig { kind, device_id, label, volume: 1.0, muted: false });
+    Some(c.audio_sources.clone())
+  });
+
+  match sources {
+    Some(list) => {
+      persist_config();
+      Ok(list)
+    }
+    None => Err(format!("Ya hay el maximo de {MAX_AUDIO_SOURCES} fuentes de audio")),
+  }
+}
+
+#[tauri::command]
+fn remove_audio_source(index: usize) -> Result<Vec<config::AudioSourceConfig>, String> {
+  let list = with_config(|c| {
+    if index < c.audio_sources.len() {
+      c.audio_sources.remove(index);
+    }
+    c.audio_sources.clone()
+  });
+  persist_config();
+  Ok(list)
+}
+
+/// Ajusta volumen/mute de una fuente de audio ya configurada. Si la
+/// grabacion esta activa, tambien lo aplica en vivo sobre la fuente real
+/// (sin necesidad de reiniciar), igual que el mixer de OBS.
+#[tauri::command]
+fn set_audio_source_volume(index: usize, volume: f32) -> Result<Vec<config::AudioSourceConfig>, String> {
+  let list = with_config(|c| {
+    if let Some(entry) = c.audio_sources.get_mut(index) {
+      entry.volume = volume;
+    }
+    c.audio_sources.clone()
+  });
+  persist_config();
+
+  if let Some(state) = &*CAPTURE_STATE.lock().unwrap() {
+    if let Some(source) = state.audio_sources.get(index) {
+      unsafe { obs_ffi::obs_source_set_volume(source.0, volume) };
+    }
+  }
+
+  Ok(list)
+}
+
+#[tauri::command]
+fn set_audio_source_muted(index: usize, muted: bool) -> Result<Vec<config::AudioSourceConfig>, String> {
+  let list = with_config(|c| {
+    if let Some(entry) = c.audio_sources.get_mut(index) {
+      entry.muted = muted;
+    }
+    c.audio_sources.clone()
+  });
+  persist_config();
+
+  if let Some(state) = &*CAPTURE_STATE.lock().unwrap() {
+    if let Some(source) = state.audio_sources.get(index) {
+      unsafe { obs_ffi::obs_source_set_muted(source.0, muted) };
+    }
+  }
+
+  Ok(list)
+}
+
+#[tauri::command]
+fn set_theme(theme: String) -> Result<(), String> {
+  with_config(|c| c.theme = theme);
+  persist_config();
+  Ok(())
+}
+
+/// "original" o "720p". Si ya estas grabando no aplica hasta que hagas
+/// stop_recording + start_recording (obs_reset_video no se puede llamar con
+/// el video activo).
+#[tauri::command]
+fn set_resolution(resolution: String) -> Result<(), String> {
+  with_config(|c| c.resolution = resolution);
+  persist_config();
+  Ok(())
+}
+
+#[tauri::command]
+fn set_fps(fps: i64) -> Result<(), String> {
+  with_config(|c| c.fps = fps);
+  persist_config();
+  Ok(())
+}
+
 fn cleanup_before_exit() {
   let _ = stop_recording();
   unsafe {
@@ -556,6 +900,20 @@ pub fn run() {
       }
       let _ = APP_HANDLE.set(app.handle().clone());
       *CONFIG.lock().unwrap() = Some(config::load(app.handle()));
+
+      // Emisor periodico de niveles de audio para el mixer en vivo -- lee
+      // AUDIO_LEVELS (que van llenando los callbacks de volmeter) y la
+      // manda al frontend. Corre siempre; si no hay fuentes activas manda
+      // un array vacio y no hace nada.
+      tauri::async_runtime::spawn(async {
+        loop {
+          tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+          let levels = AUDIO_LEVELS.lock().unwrap().clone();
+          if let Some(app) = APP_HANDLE.get() {
+            let _ = app.emit("audio-levels", levels);
+          }
+        }
+      });
 
       let show_item = MenuItem::with_id(app, "show", "Mostrar Emberio", true, None::<&str>)?;
       let quit_item = MenuItem::with_id(app, "quit", "Salir (corta la grabacion)", true, None::<&str>)?;
@@ -598,7 +956,18 @@ pub fn run() {
       save_clip_now,
       set_save_hotkey,
       set_clips_dir,
-      get_config
+      get_config,
+      list_monitors,
+      list_audio_output_devices,
+      list_audio_input_devices,
+      set_monitor,
+      add_audio_source,
+      remove_audio_source,
+      set_audio_source_volume,
+      set_audio_source_muted,
+      set_theme,
+      set_resolution,
+      set_fps
     ])
     .build(tauri::generate_context!())
     .expect("error while building tauri application")

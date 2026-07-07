@@ -13,10 +13,14 @@
     "windows": [
       {
         "title": "Emberio",
-        "width": 800,
-        "height": 600,
-        "resizable": true,
-        "fullscreen": false
+        "width": 860,
+        "height": 580,
+        "minWidth": 860,
+        "minHeight": 580,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": false
       }
     ],
     "security": {

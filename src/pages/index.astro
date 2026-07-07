@@ -1,152 +1,532 @@
 ---
-
+import '../styles/global.css';
 ---
 
-<html lang="en">
+<html lang="es" class="h-full">
 	<head>
 		<meta charset="utf-8" />
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 		<link rel="icon" href="/favicon.ico" />
-		<meta name="viewport" content="width=device-width" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="generator" content={Astro.generator} />
 		<title>Emberio</title>
 	</head>
-	<body>
-		<h1>Emberio</h1>
+	<body class="h-full m-0 overflow-hidden select-none font-sans text-zinc-300 antialiased">
+		<div class="w-screen h-screen bg-[#0c0c0e] flex flex-col overflow-hidden">
+			<!-- Titlebar propia (ventana sin bordes nativos) -->
+			<div
+				data-tauri-drag-region
+				class="h-10 bg-[#09090b] border-b border-zinc-800/80 flex items-center justify-between px-4 shrink-0"
+			>
+				<div class="flex items-center gap-2 pointer-events-none">
+					<img src="/logo.svg" alt="" width="16" height="16" class="rounded-sm" />
+					<span class="font-semibold text-zinc-200 text-xs tracking-wide">Emberio <span class="text-zinc-600 font-normal">| Studio Capture</span></span>
+				</div>
+				<div class="flex items-center gap-4 text-zinc-500">
+					<button id="win-minimize" aria-label="Minimizar" class="hover:text-zinc-300 cursor-pointer transition-colors leading-none">
+						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>
+					</button>
+					<button id="win-maximize" aria-label="Maximizar" class="hover:text-zinc-300 cursor-pointer transition-colors leading-none">
+						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="1"/></svg>
+					</button>
+					<button id="win-close" aria-label="Cerrar" class="hover:text-red-400 cursor-pointer transition-colors leading-none">
+						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+					</button>
+				</div>
+			</div>
 
-		<section>
-			<label for="clip-seconds">Segundos a clipear:</label>
-			<input type="number" id="clip-seconds" value="60" min="5" max="1200" />
-			<button id="start-recording">Empezar a grabar</button>
-			<button id="stop-recording">Detener grabacion</button>
-			<p id="recording-status"></p>
-		</section>
+			<div class="flex flex-1 overflow-hidden">
+				<!-- Sidebar: acciones primarias -->
+				<div class="w-64 bg-[#09090b] border-r border-zinc-800/80 p-5 flex flex-col shrink-0">
+					<div class="flex items-center justify-between mb-8">
+						<div class="flex items-center gap-2">
+							<span id="status-dot" class="w-2 h-2 rounded-full bg-zinc-600"></span>
+							<span id="status-label" class="text-xs font-bold tracking-widest uppercase text-zinc-500">Ready</span>
+						</div>
+						<span id="elapsed-timer" class="font-mono text-sm text-zinc-400">00:00:00</span>
+					</div>
 
-		<section>
-			<button id="save-clip">Guardar clip ahora</button>
-			<p id="save-clip-status"></p>
-		</section>
+					<div class="flex flex-col items-center justify-center mb-8">
+						<button
+							id="record-toggle"
+							class="w-32 h-32 rounded-full flex items-center justify-center transition-all duration-300 relative group bg-gradient-to-b from-zinc-800 to-zinc-900 border border-zinc-700 hover:border-zinc-500 shadow-lg cursor-pointer"
+						>
+							<div class="absolute inset-1 rounded-full border border-white/5 pointer-events-none"></div>
+							<div id="record-icon-idle" class="w-12 h-12 rounded-full bg-red-500 shadow-[0_0_15px_rgba(239,68,68,0.4)] group-hover:bg-red-400 group-hover:scale-105 transition-all"></div>
+							<svg id="record-icon-active" width="32" height="32" viewBox="0 0 24 24" fill="currentColor" class="text-red-500 hidden group-hover:scale-95 transition-transform" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+						</button>
+						<span id="record-label" class="mt-4 text-sm font-medium text-zinc-300">Iniciar Grabacion</span>
+					</div>
 
-		<section>
-			<button id="change-hotkey">Cambiar hotkey de guardado (por defecto F9)</button>
-			<p id="hotkey-status">Apreta el boton y despues la tecla que quieras usar.</p>
-		</section>
+					<div class="w-full h-px bg-gradient-to-r from-transparent via-zinc-800 to-transparent mb-6"></div>
 
-		<section>
-			<button id="pick-clips-dir">Elegir carpeta de clips...</button>
-			<p id="clips-dir-status"></p>
-		</section>
+					<div class="mt-auto space-y-3">
+						<div class="flex items-center justify-between text-xs text-zinc-400 px-1">
+							<span>Longitud del clip</span>
+							<div class="flex items-center gap-1 font-mono text-zinc-300 bg-zinc-900 px-2 py-1 rounded border border-zinc-800">
+								<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-zinc-500" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+								<input type="number" id="clip-seconds" value="60" min="5" max="1200" class="w-8 bg-transparent text-center focus:outline-none" aria-label="Segundos a clipear" />
+								<span class="text-zinc-500">s</span>
+							</div>
+						</div>
+						<button id="save-clip" class="w-full py-3 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 hover:border-orange-500/60 rounded-lg font-medium text-orange-400 flex items-center justify-center gap-2 transition-all group cursor-pointer">
+							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="group-hover:-translate-y-0.5 transition-transform" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+							Guardar Clip
+						</button>
+						<p id="save-clip-status" class="text-center text-[10px] text-zinc-500 font-mono min-h-[1.4em] break-words"></p>
+						<div class="text-center">
+							<span id="hotkey-label" class="text-[10px] text-zinc-500 font-mono">HOTKEY: F9</span>
+						</div>
+					</div>
+				</div>
+
+				<!-- Panel derecho: dashboard de configuracion -->
+				<div class="flex-1 bg-[#121215] p-6 overflow-y-auto flex flex-col gap-5">
+					<div class="flex items-center gap-2 text-zinc-100">
+						<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-zinc-400" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+						<h2 class="text-lg font-semibold tracking-tight">Configuracion de Captura</h2>
+					</div>
+
+					<div class="grid grid-cols-2 gap-5">
+						<!-- Fuente de video -->
+						<div class="bg-[#18181b] border border-zinc-800/80 rounded-xl p-4 flex flex-col gap-4">
+							<div class="flex items-center gap-2 mb-1">
+								<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-orange-400" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+								<h3 class="text-xs font-bold uppercase tracking-wider text-zinc-300">Fuente de Video</h3>
+							</div>
+							<div class="space-y-3">
+								<div>
+									<label class="text-[10px] text-zinc-500 uppercase tracking-wide mb-1.5 block">Pantalla</label>
+									<select id="monitor-select" class="w-full min-w-0 bg-[#09090b] border border-zinc-700 text-zinc-200 text-sm rounded-md px-3 py-2 focus:outline-none focus:border-orange-500/50 transition-colors font-medium truncate"></select>
+								</div>
+								<div class="grid grid-cols-2 gap-3">
+									<div>
+										<label class="text-[10px] text-zinc-500 uppercase tracking-wide mb-1.5 block">Resolucion</label>
+										<select id="resolution-select" class="w-full min-w-0 bg-[#09090b] border border-zinc-700 text-zinc-300 text-xs rounded-md px-3 py-1.5 focus:outline-none focus:border-orange-500/50">
+											<option value="original">Original</option>
+											<option value="720p">720p</option>
+										</select>
+									</div>
+									<div>
+										<label class="text-[10px] text-zinc-500 uppercase tracking-wide mb-1.5 block">FPS</label>
+										<select id="fps-select" class="w-full min-w-0 bg-[#09090b] border border-zinc-700 text-zinc-300 text-xs rounded-md px-3 py-1.5 focus:outline-none focus:border-orange-500/50">
+											<option value="60">60 FPS</option>
+											<option value="30">30 FPS</option>
+										</select>
+									</div>
+								</div>
+								<p class="text-[10px] text-zinc-600">Se aplica la proxima vez que arranques a grabar.</p>
+							</div>
+						</div>
+
+						<!-- Almacenamiento -->
+						<div class="bg-[#18181b] border border-zinc-800/80 rounded-xl p-4 flex flex-col gap-4">
+							<div class="flex items-center gap-2 mb-1">
+								<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-orange-400" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+								<h3 class="text-xs font-bold uppercase tracking-wider text-zinc-300">Almacenamiento</h3>
+							</div>
+							<div class="space-y-4">
+								<div>
+									<div class="flex items-center justify-between mb-1.5">
+										<label class="text-[10px] text-zinc-500 uppercase tracking-wide">Ruta de destino</label>
+										<button id="pick-clips-dir" class="text-[10px] text-orange-400 hover:text-orange-300 cursor-pointer">Explorar</button>
+									</div>
+									<div id="clips-dir-display" class="w-full bg-[#09090b] border border-zinc-700/80 text-zinc-400 text-xs rounded-md px-3 py-2 font-mono truncate cursor-pointer hover:border-zinc-600 transition-colors">
+										clips/ (por defecto)
+									</div>
+								</div>
+								<div>
+									<label class="text-[10px] text-zinc-500 uppercase tracking-wide mb-1.5 block">Hotkey de guardado</label>
+									<button id="change-hotkey" class="w-full flex items-center justify-between bg-[#09090b] border border-zinc-700/80 rounded-md px-3 py-1.5 hover:border-orange-500/50 transition-colors cursor-pointer">
+										<span class="text-xs text-zinc-300">Guardar clip</span>
+										<kbd id="hotkey-kbd" class="bg-zinc-800 text-zinc-200 px-2 py-0.5 rounded text-[10px] border border-zinc-700 font-mono">F9</kbd>
+									</button>
+								</div>
+							</div>
+						</div>
+					</div>
+
+					<!-- Mezclador de audio -->
+					<div class="bg-[#18181b] border border-zinc-800/80 rounded-xl p-5 flex flex-col gap-4 mt-1">
+						<div class="flex items-center justify-between border-b border-zinc-800/80 pb-3">
+							<div class="flex items-center gap-2">
+								<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-orange-400" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+								<h3 class="text-xs font-bold uppercase tracking-wider text-zinc-300">Mezclador de Audio</h3>
+							</div>
+							<button id="show-add-track" class="flex items-center gap-1.5 text-xs font-medium text-zinc-400 hover:text-zinc-200 bg-zinc-800/50 hover:bg-zinc-700 px-3 py-1.5 rounded-md transition-colors border border-zinc-700/50 cursor-pointer">
+								<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+								Agregar pista
+							</button>
+						</div>
+
+						<div id="add-track-form" class="hidden items-center gap-2 bg-[#09090b] border border-zinc-800 rounded-lg p-3">
+							<select id="new-audio-kind" class="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs rounded-md px-2 py-1.5 focus:outline-none">
+								<option value="output">Salida (desktop)</option>
+								<option value="input">Entrada (mic)</option>
+							</select>
+							<select id="new-audio-device" class="flex-1 min-w-0 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs rounded-md px-2 py-1.5 focus:outline-none truncate"></select>
+							<button id="confirm-add-track" class="shrink-0 text-xs font-medium bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 text-orange-400 px-3 py-1.5 rounded-md cursor-pointer transition-colors">Agregar</button>
+						</div>
+						<p id="audio-sources-status" class="text-[10px] text-zinc-500"></p>
+
+						<div id="audio-tracks" class="space-y-3 pt-1"></div>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<template id="audio-track-template">
+			<div class="audio-track flex items-center gap-4 bg-[#09090b] border border-zinc-800 p-3 rounded-lg group hover:border-zinc-700 transition-colors">
+				<div class="w-28 shrink-0">
+					<div class="track-kind text-zinc-200 text-xs font-medium"></div>
+					<div class="track-label text-[10px] text-zinc-500 truncate mt-0.5"></div>
+				</div>
+				<div class="flex-1 flex flex-col gap-1.5">
+					<input type="range" min="0" max="200" value="100" class="track-volume w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500" />
+					<div class="w-full h-1.5 bg-zinc-800 rounded-sm overflow-hidden">
+						<div class="track-level h-full bg-orange-500 transition-[width] duration-75" style="width:0%"></div>
+					</div>
+				</div>
+				<div class="track-volume-label w-10 text-right shrink-0 font-mono text-xs text-zinc-400">100%</div>
+				<button class="track-mute text-zinc-500 hover:text-zinc-200 transition-colors cursor-pointer" aria-label="Silenciar">
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+				</button>
+				<button class="track-remove text-zinc-600 hover:text-red-400 transition-colors cursor-pointer" aria-label="Quitar">
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+				</button>
+			</div>
+		</template>
 
 		<script>
 			import { invoke } from "@tauri-apps/api/core";
 			import { listen } from "@tauri-apps/api/event";
 			import { open } from "@tauri-apps/plugin-dialog";
+			import { getCurrentWindow } from "@tauri-apps/api/window";
 
+			// ---------------------------------------------------------------
+			// Tipos
+			// ---------------------------------------------------------------
 			interface HotkeyConfig {
 				vk_code: number;
 				ctrl: boolean;
 				shift: boolean;
 				alt: boolean;
 			}
-
+			interface AudioSourceConfig {
+				kind: "output" | "input";
+				device_id: string;
+				label: string;
+				volume: number;
+				muted: boolean;
+			}
 			interface EmberioConfig {
 				clip_seconds: number;
 				clips_dir: string | null;
 				hotkey: HotkeyConfig | null;
+				monitor_id: string | null;
+				audio_sources: AudioSourceConfig[];
+				theme: string;
+				resolution: string;
+				fps: number;
+			}
+			interface PropertyOption {
+				name: string;
+				value: string;
 			}
 
+			function el<T extends HTMLElement = HTMLElement>(id: string): T | null {
+				return document.getElementById(id) as T | null;
+			}
 			function setText(id: string, text: string) {
-				const el = document.getElementById(id);
-				if (el) el.textContent = text;
+				const e = el(id);
+				if (e) e.textContent = text;
 			}
 
-			async function loadConfig() {
-				const config = await invoke<EmberioConfig>("get_config");
+			// ---------------------------------------------------------------
+			// Titlebar propia
+			// ---------------------------------------------------------------
+			const win = getCurrentWindow();
+			el("win-minimize")?.addEventListener("click", () => win.minimize());
+			el("win-maximize")?.addEventListener("click", () => win.toggleMaximize());
+			el("win-close")?.addEventListener("click", () => win.close());
 
-				const secondsInput = document.getElementById("clip-seconds") as HTMLInputElement;
-				secondsInput.value = String(config.clip_seconds);
+			// ---------------------------------------------------------------
+			// Grabacion: boton unico que alterna, timer real
+			// ---------------------------------------------------------------
+			let isRecording = false;
+			let timerInterval: number | undefined;
 
-				setText("clips-dir-status", config.clips_dir ? `Carpeta actual: ${config.clips_dir}` : "Usando la carpeta por defecto (clips/ junto al programa).");
+			function formatElapsed(ms: number): string {
+				const totalSeconds = Math.floor(ms / 1000);
+				const h = String(Math.floor(totalSeconds / 3600)).padStart(2, "0");
+				const m = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, "0");
+				const s = String(totalSeconds % 60).padStart(2, "0");
+				return `${h}:${m}:${s}`;
+			}
 
-				if (config.hotkey) {
-					const h = config.hotkey;
-					const combo = `${h.ctrl ? "Ctrl+" : ""}${h.shift ? "Shift+" : ""}${h.alt ? "Alt+" : ""}vk=${h.vk_code}`;
-					setText("hotkey-status", `Hotkey guardado: ${combo}`);
+			function setRecordingUi(recording: boolean) {
+				isRecording = recording;
+				const dot = el("status-dot")!;
+				const label = el("status-label")!;
+				const iconIdle = el("record-icon-idle")!;
+				const iconActive = el("record-icon-active")!;
+				const recordLabel = el("record-label")!;
+
+				if (recording) {
+					dot.className = "w-2 h-2 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.8)]";
+					label.className = "text-xs font-bold tracking-widest uppercase text-red-400";
+					label.textContent = "Live";
+					iconIdle.classList.add("hidden");
+					iconActive.classList.remove("hidden");
+					recordLabel.textContent = "Detener Grabacion";
+					const startedAt = Date.now();
+					timerInterval = window.setInterval(() => setText("elapsed-timer", formatElapsed(Date.now() - startedAt)), 1000);
+				} else {
+					dot.className = "w-2 h-2 rounded-full bg-zinc-600";
+					label.className = "text-xs font-bold tracking-widest uppercase text-zinc-500";
+					label.textContent = "Ready";
+					iconIdle.classList.remove("hidden");
+					iconActive.classList.add("hidden");
+					recordLabel.textContent = "Iniciar Grabacion";
+					if (timerInterval) clearInterval(timerInterval);
+					setText("elapsed-timer", "00:00:00");
 				}
 			}
 
-			loadConfig();
-
-			document.getElementById("pick-clips-dir")?.addEventListener("click", async () => {
-				const dir = await open({ directory: true, multiple: false, title: "Elegir carpeta para guardar los clips" });
-				if (!dir) return;
-
-				setText("clips-dir-status", "Guardando...");
+			el("record-toggle")?.addEventListener("click", async () => {
+				const btn = el<HTMLButtonElement>("record-toggle")!;
+				btn.disabled = true;
 				try {
-					const status = await invoke<string>("set_clips_dir", { dir });
-					setText("clips-dir-status", status);
+					if (!isRecording) {
+						const seconds = Number((el<HTMLInputElement>("clip-seconds"))!.value) || 60;
+						await invoke<string>("start_recording", { clipSeconds: seconds });
+						setRecordingUi(true);
+					} else {
+						await invoke<string>("stop_recording");
+						setRecordingUi(false);
+					}
 				} catch (err) {
-					setText("clips-dir-status", `Error: ${err}`);
+					setText("save-clip-status", `Error: ${err}`);
+				} finally {
+					btn.disabled = false;
 				}
 			});
 
-			document.getElementById("start-recording")?.addEventListener("click", async () => {
-				const secondsInput = document.getElementById("clip-seconds") as HTMLInputElement;
-				const seconds = Number(secondsInput.value) || 60;
-				setText("recording-status", "Arrancando...");
-				try {
-					const status = await invoke<string>("start_recording", { clipSeconds: seconds });
-					setText("recording-status", status);
-				} catch (err) {
-					setText("recording-status", `Error: ${err}`);
-				}
-			});
-
-			document.getElementById("stop-recording")?.addEventListener("click", async () => {
-				setText("recording-status", "Deteniendo...");
-				try {
-					const status = await invoke<string>("stop_recording");
-					setText("recording-status", status);
-				} catch (err) {
-					setText("recording-status", `Error: ${err}`);
-				}
-			});
-
-			document.getElementById("save-clip")?.addEventListener("click", async () => {
+			el("save-clip")?.addEventListener("click", async () => {
 				setText("save-clip-status", "Guardando...");
 				await invoke("save_clip_now");
 			});
 
 			listen<string>("clip-saved", (event) => {
-				setText("save-clip-status", `Clip guardado: ${event.payload}`);
+				setText("save-clip-status", `Guardado: ${event.payload.split(/[\\/]/).pop()}`);
 			});
-
 			listen<string>("clip-save-error", (event) => {
-				setText("save-clip-status", `Error al guardar: ${event.payload}`);
+				setText("save-clip-status", `Error: ${event.payload}`);
 			});
 
-			document.getElementById("change-hotkey")?.addEventListener("click", () => {
-				setText("hotkey-status", "Apreta la tecla que queres usar...");
+			// ---------------------------------------------------------------
+			// Hotkey de guardado
+			// ---------------------------------------------------------------
+			function describeHotkey(h: HotkeyConfig | null): string {
+				if (!h) return "F9";
+				return `${h.ctrl ? "Ctrl+" : ""}${h.shift ? "Shift+" : ""}${h.alt ? "Alt+" : ""}vk${h.vk_code}`;
+			}
+
+			el("change-hotkey")?.addEventListener("click", () => {
+				const kbd = el("hotkey-kbd")!;
+				const original = kbd.textContent;
+				kbd.textContent = "...";
 
 				const onKeyDown = async (e: KeyboardEvent) => {
 					e.preventDefault();
 					window.removeEventListener("keydown", onKeyDown, true);
-
 					try {
-						const status = await invoke<string>("set_save_hotkey", {
-							vkCode: e.keyCode,
-							ctrl: e.ctrlKey,
-							shift: e.shiftKey,
-							alt: e.altKey,
-						});
-						setText("hotkey-status", status);
+						await invoke<string>("set_save_hotkey", { vkCode: e.keyCode, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey });
+						const combo = describeHotkey({ vk_code: e.keyCode, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey });
+						kbd.textContent = combo;
+						setText("hotkey-label", `HOTKEY: ${combo.toUpperCase()}`);
 					} catch (err) {
-						setText("hotkey-status", `Error: ${err}`);
+						kbd.textContent = original;
+						setText("save-clip-status", `Error: ${err}`);
 					}
 				};
-
 				window.addEventListener("keydown", onKeyDown, true);
 			});
+
+			// ---------------------------------------------------------------
+			// Carpeta de clips
+			// ---------------------------------------------------------------
+			el("pick-clips-dir")?.addEventListener("click", async () => {
+				const dir = await open({ directory: true, multiple: false, title: "Elegir carpeta para guardar los clips" });
+				if (!dir) return;
+				try {
+					await invoke<string>("set_clips_dir", { dir });
+					setText("clips-dir-display", dir);
+				} catch (err) {
+					setText("save-clip-status", `Error: ${err}`);
+				}
+			});
+			el("clips-dir-display")?.addEventListener("click", () => el("pick-clips-dir")?.click());
+
+			// ---------------------------------------------------------------
+			// Pantalla / resolucion / fps
+			// ---------------------------------------------------------------
+			async function populateSelect(id: string, options: PropertyOption[], selected: string | null) {
+				const select = el<HTMLSelectElement>(id);
+				if (!select) return;
+				select.innerHTML = "";
+				for (const opt of options) {
+					const o = document.createElement("option");
+					o.value = opt.value;
+					o.textContent = opt.name;
+					if (selected && opt.value === selected) o.selected = true;
+					select.appendChild(o);
+				}
+			}
+
+			el("monitor-select")?.addEventListener("change", async (e) => {
+				await invoke<string>("set_monitor", { id: (e.target as HTMLSelectElement).value });
+			});
+			el("resolution-select")?.addEventListener("change", async (e) => {
+				await invoke("set_resolution", { resolution: (e.target as HTMLSelectElement).value });
+			});
+			el("fps-select")?.addEventListener("change", async (e) => {
+				await invoke("set_fps", { fps: Number((e.target as HTMLSelectElement).value) });
+			});
+
+			// ---------------------------------------------------------------
+			// Mezclador de audio
+			// ---------------------------------------------------------------
+			let audioOutputDevices: PropertyOption[] = [];
+			let audioInputDevices: PropertyOption[] = [];
+
+			async function refreshNewAudioDeviceOptions() {
+				const kind = el<HTMLSelectElement>("new-audio-kind")!.value;
+				await populateSelect("new-audio-device", kind === "input" ? audioInputDevices : audioOutputDevices, null);
+			}
+
+			el("show-add-track")?.addEventListener("click", async () => {
+				const form = el("add-track-form")!;
+				const hidden = form.classList.contains("hidden");
+				form.classList.toggle("hidden");
+				form.classList.toggle("flex", hidden);
+				if (hidden) await refreshNewAudioDeviceOptions();
+			});
+			el("new-audio-kind")?.addEventListener("change", refreshNewAudioDeviceOptions);
+
+			el("confirm-add-track")?.addEventListener("click", async () => {
+				const kind = el<HTMLSelectElement>("new-audio-kind")!.value;
+				const deviceSelect = el<HTMLSelectElement>("new-audio-device")!;
+				const deviceOption = deviceSelect.selectedOptions[0];
+				if (!deviceOption) return;
+				try {
+					const updated = await invoke<AudioSourceConfig[]>("add_audio_source", {
+						kind,
+						deviceId: deviceOption.value,
+						label: deviceOption.textContent ?? deviceOption.value,
+					});
+					renderAudioTracks(updated);
+					setText("audio-sources-status", "");
+				} catch (err) {
+					setText("audio-sources-status", `Error: ${err}`);
+				}
+			});
+
+			function renderAudioTracks(sources: AudioSourceConfig[]) {
+				const container = el("audio-tracks")!;
+				const template = el<HTMLTemplateElement>("audio-track-template")!;
+				container.innerHTML = "";
+
+				sources.forEach((source, index) => {
+					const node = template.content.cloneNode(true) as DocumentFragment;
+					const trackEl = node.querySelector(".audio-track") as HTMLElement;
+					trackEl.dataset.index = String(index);
+
+					(node.querySelector(".track-kind") as HTMLElement).textContent = source.kind === "output" ? "Salida" : "Entrada";
+					(node.querySelector(".track-label") as HTMLElement).textContent = source.label;
+
+					const volumeInput = node.querySelector(".track-volume") as HTMLInputElement;
+					const volumeLabel = node.querySelector(".track-volume-label") as HTMLElement;
+					const pct = Math.round(source.volume * 100);
+					volumeInput.value = String(pct);
+					volumeLabel.textContent = `${pct}%`;
+					volumeInput.addEventListener("input", () => {
+						volumeLabel.textContent = `${volumeInput.value}%`;
+					});
+					volumeInput.addEventListener("change", async () => {
+						await invoke<AudioSourceConfig[]>("set_audio_source_volume", { index, volume: Number(volumeInput.value) / 100 });
+					});
+
+					const muteBtn = node.querySelector(".track-mute") as HTMLButtonElement;
+					function paintMute(muted: boolean) {
+						muteBtn.classList.toggle("text-red-400", muted);
+						muteBtn.setAttribute("aria-pressed", String(muted));
+					}
+					paintMute(source.muted);
+					muteBtn.addEventListener("click", async () => {
+						const nowMuted = muteBtn.getAttribute("aria-pressed") !== "true";
+						await invoke<AudioSourceConfig[]>("set_audio_source_muted", { index, muted: nowMuted });
+						paintMute(nowMuted);
+					});
+
+					const removeBtn = node.querySelector(".track-remove") as HTMLButtonElement;
+					removeBtn.addEventListener("click", async () => {
+						const updated = await invoke<AudioSourceConfig[]>("remove_audio_source", { index });
+						renderAudioTracks(updated);
+					});
+
+					container.appendChild(node);
+				});
+			}
+
+			// Medidores de nivel en vivo (reales, vienen de obs_volmeter en Rust)
+			listen<number[]>("audio-levels", (event) => {
+				const levels = event.payload;
+				document.querySelectorAll<HTMLElement>(".audio-track").forEach((trackEl) => {
+					const index = Number(trackEl.dataset.index);
+					const level = levels[index] ?? 0;
+					const bar = trackEl.querySelector(".track-level") as HTMLElement;
+					if (!bar) return;
+					bar.style.width = `${Math.round(level * 100)}%`;
+					bar.classList.toggle("bg-orange-500", level < 0.85);
+					bar.classList.toggle("bg-red-500", level >= 0.85);
+				});
+			});
+
+			// ---------------------------------------------------------------
+			// Carga inicial
+			// ---------------------------------------------------------------
+			async function loadConfig() {
+				const config = await invoke<EmberioConfig>("get_config");
+
+				el<HTMLInputElement>("clip-seconds")!.value = String(config.clip_seconds);
+				el<HTMLSelectElement>("resolution-select")!.value = config.resolution;
+				el<HTMLSelectElement>("fps-select")!.value = String(config.fps);
+
+				setText("clips-dir-display", config.clips_dir ?? "clips/ (por defecto)");
+
+				const hotkeyDesc = describeHotkey(config.hotkey);
+				setText("hotkey-kbd", hotkeyDesc);
+				setText("hotkey-label", `HOTKEY: ${hotkeyDesc.toUpperCase()}`);
+
+				renderAudioTracks(config.audio_sources);
+
+				try {
+					const [monitors, outputs, inputs] = await Promise.all([
+						invoke<PropertyOption[]>("list_monitors"),
+						invoke<PropertyOption[]>("list_audio_output_devices"),
+						invoke<PropertyOption[]>("list_audio_input_devices"),
+					]);
+					audioOutputDevices = outputs;
+					audioInputDevices = inputs;
+					await populateSelect("monitor-select", monitors, config.monitor_id);
+					await refreshNewAudioDeviceOptions();
+				} catch (err) {
+					setText("audio-sources-status", `No se pudieron listar pantallas/dispositivos: ${err}`);
+				}
+			}
+
+			loadConfig();
 		</script>
 	</body>
 </html>

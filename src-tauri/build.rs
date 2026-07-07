@@ -32,6 +32,8 @@ fn setup_libobs() {
     println!("cargo:rustc-link-lib=dylib=obs");
 
     let bindings = bindgen::Builder::default()
+        // obs.h ya incluye obs-audio-controls.h internamente (linea ~85),
+        // asi que obs_volmeter_* ya viene incluido sin agregar nada mas.
         .header(libobs_dir.join("obs.h").to_string_lossy())
         .clang_arg(format!("-I{}", libobs_dir.display()))
         .clang_arg(format!("-I{}", build_config_dir.display()))
