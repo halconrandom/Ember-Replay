@@ -17,6 +17,8 @@
 		<p id="obs-version"></p>
 		<button id="init-obs">Inicializar libobs (video+audio+modulos)</button>
 		<p id="obs-init-status"></p>
+		<button id="start-capture">Armar captura (monitor + audio)</button>
+		<p id="start-capture-status"></p>
 		<script>
 			import { invoke } from "@tauri-apps/api/core";
 
@@ -35,6 +37,17 @@
 				el.textContent = "Inicializando...";
 				try {
 					const status = await invoke<string>("obs_init");
+					el.textContent = status;
+				} catch (err) {
+					el.textContent = `Error: ${err}`;
+				}
+			});
+
+			document.getElementById("start-capture")?.addEventListener("click", async () => {
+				const el = document.getElementById("start-capture-status")!;
+				el.textContent = "Armando captura...";
+				try {
+					const status = await invoke<string>("obs_start_capture");
 					el.textContent = status;
 				} catch (err) {
 					el.textContent = `Error: ${err}`;

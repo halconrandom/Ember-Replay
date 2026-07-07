@@ -2,6 +2,23 @@ mod obs_ffi;
 
 use std::ffi::{CStr, CString};
 use std::path::PathBuf;
+use std::sync::Mutex;
+
+/// Wrapper para poder guardar punteros crudos de libobs en un `static`.
+/// Seguro en la practica: libobs es thread-safe para estas operaciones y
+/// nosotros solo los tocamos desde comandos de Tauri (nunca en paralelo
+/// real sobre el mismo puntero).
+struct RawPtr<T>(*mut T);
+unsafe impl<T> Send for RawPtr<T> {}
+unsafe impl<T> Sync for RawPtr<T> {}
+
+struct CaptureState {
+  scene: RawPtr<obs_ffi::obs_scene_t>,
+  monitor_source: RawPtr<obs_ffi::obs_source_t>,
+  audio_source: RawPtr<obs_ffi::obs_source_t>,
+}
+
+static CAPTURE_STATE: Mutex<Option<CaptureState>> = Mutex::new(None);
 
 #[tauri::command]
 fn get_obs_version() -> String {
@@ -92,6 +109,77 @@ fn obs_init() -> Result<String, String> {
   }
 }
 
+/// Paso 2: crear una escena con captura de monitor (duplicator/DXGI, id
+/// "monitor_capture") + audio de escritorio (win-wasapi, id
+/// "wasapi_output_capture"), y ponerlas activas (canal 0 = video principal,
+/// canal 1 = audio global). Todavia no arranca el replay buffer.
+#[tauri::command]
+fn obs_start_capture() -> Result<String, String> {
+  unsafe {
+    if !obs_ffi::obs_initialized() {
+      return Err("Llama a obs_init primero".into());
+    }
+
+    {
+      let guard = CAPTURE_STATE.lock().unwrap();
+      if guard.is_some() {
+        return Ok("La captura ya estaba armada".into());
+      }
+    }
+
+    let scene_name = CString::new("Emberio Scene").unwrap();
+    let scene = obs_ffi::obs_scene_create(scene_name.as_ptr());
+    if scene.is_null() {
+      return Err("obs_scene_create devolvio null".into());
+    }
+    let scene_source = obs_ffi::obs_scene_get_source(scene);
+
+    let monitor_id = CString::new("monitor_capture").unwrap();
+    let monitor_name = CString::new("Monitor").unwrap();
+    let monitor_source = obs_ffi::obs_source_create(
+      monitor_id.as_ptr(),
+      monitor_name.as_ptr(),
+      std::ptr::null_mut(),
+      std::ptr::null_mut(),
+    );
+    if monitor_source.is_null() {
+      obs_ffi::obs_scene_release(scene);
+      return Err("obs_source_create('monitor_capture') devolvio null".into());
+    }
+    obs_ffi::obs_scene_add(scene, monitor_source);
+
+    let audio_id = CString::new("wasapi_output_capture").unwrap();
+    let audio_name = CString::new("Audio de escritorio").unwrap();
+    let audio_source = obs_ffi::obs_source_create(
+      audio_id.as_ptr(),
+      audio_name.as_ptr(),
+      std::ptr::null_mut(),
+      std::ptr::null_mut(),
+    );
+    if audio_source.is_null() {
+      obs_ffi::obs_source_release(monitor_source);
+      obs_ffi::obs_scene_release(scene);
+      return Err("obs_source_create('wasapi_output_capture') devolvio null".into());
+    }
+
+    obs_ffi::obs_set_output_source(0, scene_source);
+    obs_ffi::obs_set_output_source(1, audio_source);
+
+    let monitor_active = obs_ffi::obs_source_active(monitor_source);
+    let audio_active = obs_ffi::obs_source_active(audio_source);
+
+    *CAPTURE_STATE.lock().unwrap() = Some(CaptureState {
+      scene: RawPtr(scene),
+      monitor_source: RawPtr(monitor_source),
+      audio_source: RawPtr(audio_source),
+    });
+
+    Ok(format!(
+      "Escena creada. monitor_capture activo={monitor_active}, wasapi_output_capture activo={audio_active}"
+    ))
+  }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
@@ -105,7 +193,7 @@ pub fn run() {
       }
       Ok(())
     })
-    .invoke_handler(tauri::generate_handler![get_obs_version, obs_init])
+    .invoke_handler(tauri::generate_handler![get_obs_version, obs_init, obs_start_capture])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
 }
