@@ -63,7 +63,19 @@ fn setup_libobs() {
 
     copy_files_flat(&rundir.join("bin/64bit"), &target_dir);
     copy_dir_recursive(&rundir.join("obs-plugins/64bit"), &target_dir.join("obs-plugins/64bit"));
-    copy_dir_recursive(&rundir.join("data"), &target_dir.join("data"));
+
+    // OJO: "data/" NO va junto al .exe. libobs busca sus archivos core
+    // (shaders/effects) con una ruta hardcodeada "../../data/libobs/"
+    // relativa al CWD (no al ejecutable, ver libobs/obs-windows.c
+    // find_libobs_data_file -- no hay API publica para overridear esto).
+    // Como en lib.rs fijamos el CWD al directorio del .exe (target/<profile>)
+    // antes de llamar obs_startup, "data/" tiene que vivir 2 niveles arriba
+    // de ahi (junto a Cargo.toml) para que "../../data/libobs/" resuelva bien.
+    let src_tauri_dir = target_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("no se pudo resolver src-tauri/ desde target dir");
+    copy_dir_recursive(&rundir.join("data"), &src_tauri_dir.join("data"));
 
     // obs.dll (y los encoders) linkean en tiempo de carga contra el runtime
     // de obs-deps (ffmpeg, x264, curl, jansson, zlib...). Ese "bin" no se

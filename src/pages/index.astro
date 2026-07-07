@@ -15,6 +15,8 @@
 		<h1>Emberio</h1>
 		<button id="check-obs">Probar libobs</button>
 		<p id="obs-version"></p>
+		<button id="init-obs">Inicializar libobs (video+audio+modulos)</button>
+		<p id="obs-init-status"></p>
 		<script>
 			import { invoke } from "@tauri-apps/api/core";
 
@@ -23,6 +25,17 @@
 				try {
 					const version = await invoke<string>("get_obs_version");
 					el.textContent = `libobs version: ${version}`;
+				} catch (err) {
+					el.textContent = `Error: ${err}`;
+				}
+			});
+
+			document.getElementById("init-obs")?.addEventListener("click", async () => {
+				const el = document.getElementById("obs-init-status")!;
+				el.textContent = "Inicializando...";
+				try {
+					const status = await invoke<string>("obs_init");
+					el.textContent = status;
 				} catch (err) {
 					el.textContent = `Error: ${err}`;
 				}
