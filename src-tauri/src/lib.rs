@@ -1026,7 +1026,20 @@ fn reorder_overlay(index: usize, up: bool) -> Result<Vec<OverlayInfo>, String> {
       
       state.overlays.swap(index, target_index);
       
-      let items_raw: Vec<*mut obs_ffi::obs_sceneitem_t> = state.overlays.iter().map(|item| item.item.0).collect();
+      let mut items_raw: Vec<*mut obs_ffi::obs_sceneitem_t> = Vec::new();
+      
+      // Prepend main capture source item so it remains at the very bottom (Z-index 0)
+      let name_c = obs_ffi::obs_source_get_name(state.capture_source.0);
+      let main_item = obs_ffi::obs_scene_find_source_recursive(state.scene.0, name_c);
+      if !main_item.is_null() {
+        items_raw.push(main_item);
+      }
+      
+      // Append overlays
+      for overlay in &state.overlays {
+        items_raw.push(overlay.item.0);
+      }
+      
       obs_ffi::obs_scene_reorder_items(state.scene.0, items_raw.as_ptr() as *const _, items_raw.len());
     }
   }
