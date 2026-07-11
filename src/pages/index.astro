@@ -61,10 +61,15 @@ import '../styles/global.css';
 						<div class="bg-[#121215] border border-zinc-800/80 rounded-xl p-2.5 flex flex-col items-center justify-center shrink-0">
 							<div id="preview-surface" class="w-[440px] h-[248px] bg-black rounded-lg border border-zinc-900 flex items-center justify-center overflow-hidden shrink-0 relative">
 								<span id="preview-placeholder" class="text-[11px] text-zinc-600 px-6 text-center select-none">Preview apagado -- actívalo para ver la transmisión</span>
+								
+								<!-- Resize Handle -->
+								<div id="preview-resizer" class="absolute bottom-1 right-1 w-3.5 h-3.5 cursor-se-resize flex items-center justify-center text-zinc-600 hover:text-zinc-300 select-none z-10">
+									<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M22 22H2v-4h16V2h4v20z"/></svg>
+								</div>
 							</div>
 							
 							<!-- Toolbar de control del Preview -->
-							<div class="w-[440px] flex items-center justify-between mt-2 px-1 select-none shrink-0">
+							<div id="preview-toolbar" class="w-[440px] flex items-center justify-between mt-2 px-1 select-none shrink-0">
 								<div class="flex items-center gap-2">
 									<button id="toggle-preview" class="text-xs font-medium text-orange-400 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 rounded px-3 py-0.5 transition-all cursor-pointer">
 										Activar preview
@@ -295,8 +300,8 @@ import '../styles/global.css';
 					</div>
 				</div>
 
-				<!-- Volume percentage label -->
-				<div class="track-volume-label text-[8px] text-zinc-400 font-mono shrink-0 select-none">100%</div>
+				<!-- Volume decibel label/input -->
+				<input type="text" class="track-volume-db w-16 bg-zinc-900/60 border border-zinc-800 hover:border-zinc-700 focus:border-orange-500/50 text-zinc-300 text-[8px] font-mono rounded text-center focus:outline-none shrink-0" title="Volumen en dB (presiona Enter para guardar)" />
 			</div>
 		</template>
 
@@ -422,6 +427,52 @@ import '../styles/global.css';
 			titlebar.addEventListener("dblclick", async (e) => {
 				if ((e.target as HTMLElement).closest("button") || (e.target as HTMLElement).closest("a")) return;
 				await win.toggleMaximize();
+			});
+
+			// ---------------------------------------------------------------
+			// Redimensionar Preview (Resize handle)
+			// ---------------------------------------------------------------
+			const previewSurface = el("preview-surface")!;
+			const resizeHandle = el("preview-resizer")!;
+			let isResizing = false;
+			let startX = 0;
+			let startWidth = 0;
+
+			resizeHandle.addEventListener("mousedown", (e) => {
+				e.stopPropagation();
+				e.preventDefault();
+				isResizing = true;
+				startX = e.clientX;
+				startWidth = previewSurface.offsetWidth;
+			});
+
+			window.addEventListener("mouseup", () => {
+				if (isResizing) {
+					isResizing = false;
+				}
+			});
+
+			window.addEventListener("mousemove", (e) => {
+				if (isResizing) {
+					const dx = e.clientX - startX;
+					let newWidth = startWidth + dx;
+					
+					// Limitar tamaño entre 240px y 500px para que encaje en el layout
+					if (newWidth < 240) newWidth = 240;
+					if (newWidth > 500) newWidth = 500;
+					
+					previewSurface.style.width = `${newWidth}px`;
+					previewSurface.style.height = `${Math.round(newWidth * 9 / 16)}px`;
+					
+					// Ajustar toolbar
+					const previewToolbar = el("preview-toolbar")!;
+					if (previewToolbar) {
+						previewToolbar.style.width = `${newWidth}px`;
+					}
+					
+					// Actualizar coordenadas nativas
+					refreshPreviewRectIfEnabled();
+				}
 			});
 
 			// ---------------------------------------------------------------
@@ -648,10 +699,27 @@ import '../styles/global.css';
 			});
 
 			// ---------------------------------------------------------------
-			// Mezclador de audio
+			// Mezclador de audio & Conversiones dB
 			// ---------------------------------------------------------------
 			let audioOutputDevices: PropertyOption[] = [];
 			let audioInputDevices: PropertyOption[] = [];
+
+			function linearToDb(val: number): string {
+				if (val <= 0.0001) return "-inf dB";
+				const db = 20 * Math.log10(val);
+				return `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`;
+			}
+
+			function dbToLinear(dbStr: string): number {
+				const cleaned = dbStr.toLowerCase().replace("db", "").replace(" ", "").trim();
+				if (cleaned === "-inf" || cleaned === "inf" || Number(cleaned) <= -96.0) {
+					return 0.0;
+				}
+				const db = parseFloat(cleaned);
+				if (isNaN(db)) return 1.0;
+				const clampedDb = Math.max(-96.0, Math.min(6.0, db));
+				return Math.pow(10, clampedDb / 20);
+			}
 
 			async function refreshNewAudioDeviceOptions() {
 				const kind = el<HTMLSelectElement>("new-audio-kind")!.value;
@@ -712,15 +780,28 @@ import '../styles/global.css';
 					});
 
 					const volumeInput = node.querySelector(".track-volume") as HTMLInputElement;
-					const volumeLabel = node.querySelector(".track-volume-label") as HTMLElement;
-					const pct = Math.round(source.volume * 100);
+					const volumeDbInput = node.querySelector(".track-volume-db") as HTMLInputElement;
+					
+					const linear = source.volume;
+					const pct = Math.round(linear * 100);
 					volumeInput.value = String(pct);
-					volumeLabel.textContent = `${pct}%`;
+					volumeDbInput.value = linearToDb(linear);
+
 					volumeInput.addEventListener("input", () => {
-						volumeLabel.textContent = `${volumeInput.value}%`;
+						const currentLinear = Number(volumeInput.value) / 100;
+						volumeDbInput.value = linearToDb(currentLinear);
 					});
+					
 					volumeInput.addEventListener("change", async () => {
-						await invoke<AudioSourceConfig[]>("set_audio_source_volume", { index, volume: Number(volumeInput.value) / 100 });
+						const currentLinear = Number(volumeInput.value) / 100;
+						await invoke<AudioSourceConfig[]>("set_audio_source_volume", { index, volume: currentLinear });
+					});
+
+					volumeDbInput.addEventListener("change", async () => {
+						const newLinear = dbToLinear(volumeDbInput.value);
+						volumeInput.value = String(Math.round(newLinear * 100));
+						await invoke<AudioSourceConfig[]>("set_audio_source_volume", { index, volume: newLinear });
+						volumeDbInput.value = linearToDb(newLinear);
 					});
 
 					const muteBtn = node.querySelector(".track-mute") as HTMLButtonElement;
