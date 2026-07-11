@@ -16,7 +16,8 @@ import '../styles/global.css';
 			<!-- Titlebar propia (ventana sin bordes nativos) -->
 			<div
 				data-tauri-drag-region
-				class="h-10 bg-[#060608] border-b border-zinc-900/80 flex items-center justify-between px-4 shrink-0"
+				id="app-titlebar"
+				class="h-8 bg-[#060608] border-b border-zinc-900/80 flex items-center justify-between px-4 shrink-0 select-none cursor-default"
 			>
 				<div class="flex items-center gap-2 pointer-events-none">
 					<img src="/logo.svg" alt="" width="16" height="16" class="rounded-sm" />
@@ -36,10 +37,10 @@ import '../styles/global.css';
 			</div>
 
 			<!-- Tab Switcher Bar -->
-			<div class="h-12 bg-[#0c0c0e] border-b border-zinc-800/80 flex items-center justify-between px-5 shrink-0 select-none">
+			<div class="h-10 bg-[#0c0c0e] border-b border-zinc-800/80 flex items-center justify-between px-5 shrink-0 select-none">
 				<div class="flex items-center gap-1 bg-[#18181b] p-0.5 rounded-lg border border-zinc-800">
-					<button id="tab-studio" class="px-4 py-1 text-xs font-semibold rounded-md transition-all duration-200 cursor-pointer bg-[#e05a10] text-white">Estudio</button>
-					<button id="tab-settings" class="px-4 py-1 text-xs font-medium rounded-md transition-all duration-200 text-zinc-400 hover:text-zinc-200 cursor-pointer">Configuración</button>
+					<button id="tab-studio" class="px-4 py-0.5 text-xs font-semibold rounded-md transition-all duration-200 cursor-pointer bg-[#e05a10] text-white">Estudio</button>
+					<button id="tab-settings" class="px-4 py-0.5 text-xs font-medium rounded-md transition-all duration-200 text-zinc-400 hover:text-zinc-200 cursor-pointer">Configuración</button>
 				</div>
 				<div class="flex items-center gap-4">
 					<div class="flex items-center gap-2">
@@ -53,29 +54,29 @@ import '../styles/global.css';
 			<!-- Viewport Container -->
 			<div class="flex-1 overflow-hidden relative bg-[#09090b]">
 				<!-- Pestaña 1: Estudio -->
-				<div id="content-studio" class="absolute inset-0 flex gap-4 p-4 overflow-hidden">
+				<div id="content-studio" class="absolute inset-0 flex gap-3 p-3 overflow-hidden">
 					<!-- Columna Izquierda: Preview y Fuentes -->
-					<div class="flex-1 flex flex-col gap-4 overflow-hidden">
+					<div class="flex-1 flex flex-col gap-2 overflow-hidden">
 						<!-- Panel Preview -->
-						<div class="bg-[#121215] border border-zinc-800/80 rounded-xl p-3 flex flex-col items-center justify-center shrink-0">
-							<div id="preview-surface" class="w-[480px] h-[270px] bg-black rounded-lg border border-zinc-900 flex items-center justify-center overflow-hidden shrink-0 relative">
+						<div class="bg-[#121215] border border-zinc-800/80 rounded-xl p-2.5 flex flex-col items-center justify-center shrink-0">
+							<div id="preview-surface" class="w-[440px] h-[248px] bg-black rounded-lg border border-zinc-900 flex items-center justify-center overflow-hidden shrink-0 relative">
 								<span id="preview-placeholder" class="text-[11px] text-zinc-600 px-6 text-center select-none">Preview apagado -- actívalo para ver la transmisión</span>
 							</div>
 							
 							<!-- Toolbar de control del Preview -->
-							<div class="w-[480px] flex items-center justify-between mt-2.5 px-1 select-none shrink-0">
+							<div class="w-[440px] flex items-center justify-between mt-2 px-1 select-none shrink-0">
 								<div class="flex items-center gap-2">
-									<button id="toggle-preview" class="text-xs font-medium text-orange-400 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 rounded px-3 py-1 transition-all cursor-pointer">
+									<button id="toggle-preview" class="text-xs font-medium text-orange-400 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 rounded px-3 py-0.5 transition-all cursor-pointer">
 										Activar preview
 									</button>
-									<div class="flex items-center gap-1.5 bg-zinc-900 px-2 py-1 rounded border border-zinc-800">
+									<div class="flex items-center gap-1.5 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800">
 										<span class="text-[10px] text-zinc-500 uppercase tracking-wide">Zoom:</span>
 										<span id="zoom-display" class="text-xs text-zinc-300 font-mono min-w-[32px] text-center">100%</span>
-										<button id="reset-zoom" class="text-[9px] text-zinc-400 hover:text-zinc-200 bg-zinc-800 px-1.5 py-0.5 rounded border border-zinc-700 font-medium">Reset</button>
+										<button id="reset-zoom" class="text-[9px] text-zinc-400 hover:text-zinc-200 bg-zinc-800 px-1.5 py-0.2 rounded border border-zinc-700 font-medium">Reset</button>
 									</div>
 								</div>
 								
-								<div class="flex items-center gap-2 bg-zinc-900 px-2 py-1 rounded border border-zinc-800">
+								<div class="flex items-center gap-2 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800">
 									<label for="grid-select" class="text-[10px] text-zinc-500 uppercase tracking-wide">Cuadrícula:</label>
 									<select id="grid-select" class="bg-transparent border-none text-zinc-300 text-xs focus:outline-none cursor-pointer">
 										<option value="none">Ninguna</option>
@@ -88,8 +89,8 @@ import '../styles/global.css';
 						</div>
 
 						<!-- Panel Fuentes / Capas -->
-						<div class="flex-1 bg-[#121215] border border-zinc-800/80 rounded-xl p-4 flex flex-col overflow-hidden">
-							<div class="flex items-center justify-between border-b border-zinc-800/50 pb-2.5 mb-2.5 shrink-0">
+						<div class="flex-1 bg-[#121215] border border-zinc-800/80 rounded-xl p-3 flex flex-col overflow-hidden">
+							<div class="flex items-center justify-between border-b border-zinc-800/50 pb-2 mb-2 shrink-0">
 								<div class="flex items-center gap-2">
 									<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-orange-500"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
 									<h3 class="text-xs font-bold uppercase tracking-wider text-zinc-300">Fuentes / Capas</h3>
@@ -115,9 +116,9 @@ import '../styles/global.css';
 					</div>
 
 					<!-- Columna Derecha: Grabación y Mixer -->
-					<div class="w-[320px] flex flex-col gap-4 overflow-hidden shrink-0">
+					<div class="w-[360px] flex flex-col gap-2 overflow-hidden shrink-0">
 						<!-- Panel Controles de Grabación -->
-						<div class="bg-[#121215] border border-zinc-800/80 rounded-xl p-3 flex flex-col gap-2.5 shrink-0">
+						<div class="bg-[#121215] border border-zinc-800/80 rounded-xl p-3 flex flex-col gap-2 shrink-0">
 							<div class="flex items-center gap-2 border-b border-zinc-800/50 pb-2">
 								<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-orange-500"><circle cx="12" cy="12" r="10"/><path d="m4.93 4.93 4.24 4.24"/></svg>
 								<h3 class="text-xs font-bold uppercase tracking-wider text-zinc-300">Controles de Captura</h3>
@@ -153,7 +154,7 @@ import '../styles/global.css';
 
 						<!-- Panel Mezclador de Audio -->
 						<div class="flex-1 bg-[#121215] border border-zinc-800/80 rounded-xl p-3 flex flex-col overflow-hidden">
-							<div class="flex items-center justify-between border-b border-zinc-800/50 pb-2 mb-2.5 shrink-0">
+							<div class="flex items-center justify-between border-b border-zinc-800/50 pb-2 mb-2 shrink-0">
 								<div class="flex items-center gap-2">
 									<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-orange-500"><path d="M12 2v20M17 5v14M22 9v6M7 8v8M2 10v4"/></svg>
 									<h3 class="text-xs font-bold uppercase tracking-wider text-zinc-300">Mezclador de Audio</h3>
@@ -258,16 +259,16 @@ import '../styles/global.css';
 			</div>
 
 			<!-- Status Bar Footer -->
-			<div class="h-6 bg-[#060608] border-t border-zinc-900 flex items-center justify-between px-4 text-[10px] text-zinc-600 shrink-0 select-none">
+			<div class="h-5 bg-[#060608] border-t border-zinc-900 flex items-center justify-between px-4 text-[10px] text-zinc-650 shrink-0 select-none">
 				<span>Ember v0.1.0</span>
 				<span>Developed by halcon.dev</span>
 			</div>
 		</div>
 
 		<template id="audio-track-template">
-			<div class="audio-track flex flex-col items-center justify-between bg-[#18181b]/95 border border-zinc-800/85 p-2 rounded-xl group hover:border-zinc-700/85 transition-colors w-[92px] shrink-0 h-full relative select-none">
+			<div class="audio-track flex flex-col items-center justify-between bg-[#18181b]/95 border border-zinc-800/85 p-1.5 rounded-xl group hover:border-zinc-700/85 transition-colors w-[84px] shrink-0 h-full relative select-none">
 				<!-- Mute & Remove icons on top corners -->
-				<div class="w-full flex justify-between px-1 shrink-0 mb-1">
+				<div class="w-full flex justify-between px-1 shrink-0 mb-0.5">
 					<button class="track-mute text-zinc-500 hover:text-zinc-200 transition-colors cursor-pointer" aria-label="Silenciar">
 						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
 					</button>
@@ -277,25 +278,25 @@ import '../styles/global.css';
 				</div>
 
 				<!-- Track Labels -->
-				<div class="w-full text-center shrink-0 min-h-[30px] px-1 mb-1.5">
-					<div class="track-label text-[10px] text-zinc-250 font-bold truncate cursor-pointer hover:text-orange-400 select-all" title="Doble clic para renombrar"></div>
-					<div class="track-kind text-[8px] text-zinc-550 uppercase font-semibold mt-0.5"></div>
+				<div class="w-full text-center shrink-0 min-h-[26px] px-1 mb-1">
+					<div class="track-label text-[9px] text-zinc-250 font-bold truncate cursor-pointer hover:text-orange-400 select-all" title="Doble clic para renombrar"></div>
+					<div class="track-kind text-[7px] text-zinc-550 uppercase font-semibold mt-0.5"></div>
 				</div>
 
 				<!-- Vertical Sliders & Level Meter -->
-				<div class="flex-1 flex items-center justify-center gap-2 mb-1.5 h-16 w-full px-2">
+				<div class="flex-1 flex items-center justify-center gap-1.5 mb-1 w-full px-2">
 					<!-- VU Level Meter (Vertical) -->
-					<div class="w-1.5 h-full bg-zinc-900 rounded-sm overflow-hidden flex flex-col justify-end border border-zinc-800">
+					<div class="w-1 h-full bg-zinc-900 rounded-sm overflow-hidden flex flex-col justify-end border border-zinc-850">
 						<div class="track-level w-full bg-orange-500 transition-[height] duration-75" style="height:0%"></div>
 					</div>
 					<!-- Volume Slider (Vertical) -->
 					<div class="h-full flex items-center flex-1 justify-center">
-						<input type="range" min="0" max="200" value="100" class="track-volume h-full w-1.5 bg-zinc-900 rounded-lg appearance-none cursor-pointer accent-orange-500 [writing-mode:vertical-lr] [direction:rtl] border border-zinc-800" />
+						<input type="range" min="0" max="200" value="100" class="track-volume h-full w-1 bg-zinc-900 rounded-lg appearance-none cursor-pointer accent-orange-500 [writing-mode:vertical-lr] [direction:rtl] border border-zinc-850" />
 					</div>
 				</div>
 
 				<!-- Volume percentage label -->
-				<div class="track-volume-label text-[9px] text-zinc-400 font-mono shrink-0 select-none">100%</div>
+				<div class="track-volume-label text-[8px] text-zinc-400 font-mono shrink-0 select-none">100%</div>
 			</div>
 		</template>
 
@@ -392,6 +393,38 @@ import '../styles/global.css';
 			el("win-close")?.addEventListener("click", () => win.close());
 
 			// ---------------------------------------------------------------
+			// Arrastre de ventana maximizada (Drag region fix)
+			// ---------------------------------------------------------------
+			const titlebar = el("app-titlebar")!;
+			let isMouseDown = false;
+
+			titlebar.addEventListener("mousedown", (e) => {
+				if ((e.target as HTMLElement).closest("button") || (e.target as HTMLElement).closest("a")) return;
+				isMouseDown = true;
+			});
+
+			window.addEventListener("mouseup", () => {
+				isMouseDown = false;
+			});
+
+			titlebar.addEventListener("mousemove", async () => {
+				if (isMouseDown) {
+					const isMax = await win.isMaximized();
+					if (isMax) {
+						isMouseDown = false;
+						await win.unmaximize();
+						await win.startDragging();
+					}
+				}
+			});
+
+			// Doble clic para maximizar/restaurar
+			titlebar.addEventListener("dblclick", async (e) => {
+				if ((e.target as HTMLElement).closest("button") || (e.target as HTMLElement).closest("a")) return;
+				await win.toggleMaximize();
+			});
+
+			// ---------------------------------------------------------------
 			// Control de Pestañas
 			// ---------------------------------------------------------------
 			let activeTab = "studio"; // "studio" o "settings"
@@ -404,8 +437,8 @@ import '../styles/global.css';
 				const contentSettings = el("content-settings")!;
 
 				if (tab === "studio") {
-					btnStudio.className = "px-4 py-1 text-xs font-semibold rounded-md transition-all duration-200 cursor-pointer bg-[#e05a10] text-white";
-					btnSettings.className = "px-4 py-1 text-xs font-medium rounded-md transition-all duration-200 text-zinc-400 hover:text-zinc-200 cursor-pointer";
+					btnStudio.className = "px-4 py-0.5 text-xs font-semibold rounded-md transition-all duration-200 cursor-pointer bg-[#e05a10] text-white";
+					btnSettings.className = "px-4 py-0.5 text-xs font-medium rounded-md transition-all duration-200 text-zinc-400 hover:text-zinc-200 cursor-pointer";
 					contentStudio.classList.remove("hidden");
 					contentSettings.classList.add("hidden");
 
@@ -414,8 +447,8 @@ import '../styles/global.css';
 						setPreviewEnabled(true);
 					}
 				} else {
-					btnStudio.className = "px-4 py-1 text-xs font-medium rounded-md transition-all duration-200 text-zinc-400 hover:text-zinc-200 cursor-pointer";
-					btnSettings.className = "px-4 py-1 text-xs font-semibold rounded-md transition-all duration-200 cursor-pointer bg-[#e05a10] text-white";
+					btnStudio.className = "px-4 py-0.5 text-xs font-medium rounded-md transition-all duration-200 text-zinc-400 hover:text-zinc-200 cursor-pointer";
+					btnSettings.className = "px-4 py-0.5 text-xs font-semibold rounded-md transition-all duration-200 cursor-pointer bg-[#e05a10] text-white";
 					contentStudio.classList.add("hidden");
 					contentSettings.classList.remove("hidden");
 
