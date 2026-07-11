@@ -224,7 +224,7 @@ unsafe fn draw_grid_lines(base_w: u32, base_h: u32, grid_type: &str) {
       }
     }
 
-    obs_ffi::gs_render_draw(obs_ffi::gs_draw_mode_GS_LINES);
+    obs_ffi::gs_render_stop(obs_ffi::gs_draw_mode_GS_LINES);
     obs_ffi::gs_technique_end_pass(technique);
   }
   obs_ffi::gs_technique_end(technique);
