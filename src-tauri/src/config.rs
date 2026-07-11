@@ -38,12 +38,57 @@ fn default_volume() -> f32 {
   1.0
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayKind {
+  /// image_source -- overlay estatico (logo, marco, etc). `content` = ruta
+  /// de archivo.
+  Image,
+  /// text_ft2_source -- overlay de texto simple. `content` = el texto.
+  Text,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct OverlayConfig {
+  pub kind: OverlayKind,
+  pub content: String,
+  #[serde(default = "default_overlay_pos")]
+  pub x: f32,
+  #[serde(default = "default_overlay_pos")]
+  pub y: f32,
+  #[serde(default = "default_overlay_scale")]
+  pub scale: f32,
+  #[serde(default = "default_overlay_visible")]
+  pub visible: bool,
+  #[serde(default = "default_overlay_locked")]
+  pub locked: bool,
+}
+
+fn default_overlay_locked() -> bool {
+  false
+}
+
+fn default_overlay_pos() -> f32 {
+  100.0
+}
+
+fn default_overlay_scale() -> f32 {
+  1.0
+}
+
+fn default_overlay_visible() -> bool {
+  true
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct EmberioConfig {
   #[serde(default = "default_clip_seconds")]
   pub clip_seconds: i64,
   pub clips_dir: Option<String>,
   pub hotkey: Option<HotkeyConfig>,
+  #[serde(default = "default_video_source_type")]
+  pub video_source_type: String,
+  pub video_source_id: Option<String>,
   pub monitor_id: Option<String>,
   #[serde(default = "default_audio_sources")]
   pub audio_sources: Vec<AudioSourceConfig>,
@@ -54,6 +99,8 @@ pub struct EmberioConfig {
   pub resolution: String,
   #[serde(default = "default_fps")]
   pub fps: i64,
+  #[serde(default)]
+  pub overlays: Vec<OverlayConfig>,
 }
 
 fn default_clip_seconds() -> i64 {
@@ -62,6 +109,10 @@ fn default_clip_seconds() -> i64 {
 
 fn default_theme() -> String {
   "dark".to_string()
+}
+
+fn default_video_source_type() -> String {
+  "screen".to_string()
 }
 
 fn default_resolution() -> String {
@@ -88,11 +139,14 @@ impl Default for EmberioConfig {
       clip_seconds: default_clip_seconds(),
       clips_dir: None,
       hotkey: None,
+      video_source_type: default_video_source_type(),
+      video_source_id: None,
       monitor_id: None,
       audio_sources: default_audio_sources(),
       theme: default_theme(),
       resolution: default_resolution(),
       fps: default_fps(),
+      overlays: Vec::new(),
     }
   }
 }

@@ -17,7 +17,7 @@ unsafe impl<T> Sync for RawPtr<T> {}
 
 struct CaptureState {
   scene: RawPtr<obs_ffi::obs_scene_t>,
-  monitor_source: RawPtr<obs_ffi::obs_source_t>,
+  capture_source: RawPtr<obs_ffi::obs_source_t>,
   /// Una fuente de audio por cada entrada en config.audio_sources, en el
   /// mismo orden -- ocupan los canales de salida 1..=N.
   audio_sources: Vec<RawPtr<obs_ffi::obs_source_t>>,
@@ -362,15 +362,7 @@ unsafe fn ensure_capture_started() -> Result<(), String> {
     return Ok(());
   }
 
-  let mut monitor_id_cfg = with_config(|c| c.monitor_id.clone());
-  if monitor_id_cfg.is_none() {
-    let monitors = list_property_options("monitor_capture", "monitor_id");
-    if let Some(first) = monitors.first() {
-      monitor_id_cfg = Some(first.value.clone());
-      with_config(|c| c.monitor_id = Some(first.value.clone()));
-      persist_config();
-    }
-  }
+  let (source_type, mut source_id_cfg) = with_config(|c| (c.video_source_type.clone(), c.video_source_id.clone()));
   let audio_sources_cfg = with_config(|c| c.audio_sources.clone());
 
   let scene_name = CString::new("Ember Scene").unwrap();
@@ -380,30 +372,66 @@ unsafe fn ensure_capture_started() -> Result<(), String> {
   }
   let scene_source = obs_ffi::obs_scene_get_source(scene);
 
-  let monitor_id = CString::new("monitor_capture").unwrap();
-  let monitor_name = CString::new("Monitor").unwrap();
-  let monitor_settings = single_string_settings("monitor_id", &monitor_id_cfg);
-  let monitor_source =
-    obs_ffi::obs_source_create(monitor_id.as_ptr(), monitor_name.as_ptr(), monitor_settings, std::ptr::null_mut());
-  if !monitor_settings.is_null() {
-    obs_ffi::obs_data_release(monitor_settings);
-  }
-  if monitor_source.is_null() {
-    obs_ffi::obs_scene_release(scene);
-    return Err("obs_source_create('monitor_capture') devolvio null".into());
-  }
-  obs_ffi::obs_scene_add(scene, monitor_source);
+  let source_plugin = match source_type.as_str() {
+    "window" => "window_capture",
+    "game" => "game_capture",
+    _ => "monitor_capture",
+  };
 
+  if source_id_cfg.is_none() {
+    let options = list_property_options(source_plugin, if source_plugin == "monitor_capture" { "monitor_id" } else { "window" });
+    if let Some(first) = options.first() {
+      source_id_cfg = Some(first.value.clone());
+      with_config(|c| c.video_source_id = Some(first.value.clone()));
+      persist_config();
+    }
+  }
+
+  let plugin_c = CString::new(source_plugin).unwrap();
+  let name_c = CString::new("Captura Principal").unwrap();
+  let settings = obs_ffi::obs_data_create();
+  if let Some(ref val) = source_id_cfg {
+    let val_c = CString::new(val.as_str()).unwrap();
+    if source_plugin == "monitor_capture" {
+      let key_c = CString::new("monitor_id").unwrap();
+      obs_ffi::obs_data_set_string(settings, key_c.as_ptr(), val_c.as_ptr());
+    } else {
+      let key_c = CString::new("window").unwrap();
+      obs_ffi::obs_data_set_string(settings, key_c.as_ptr(), val_c.as_ptr());
+      if source_plugin == "game_capture" {
+        let mode_key = CString::new("capture_mode").unwrap();
+        let mode_val = CString::new("window").unwrap();
+        obs_ffi::obs_data_set_string(settings, mode_key.as_ptr(), mode_val.as_ptr());
+      }
+    }
+  }
+
+  let capture_source = obs_ffi::obs_source_create(plugin_c.as_ptr(), name_c.as_ptr(), settings, std::ptr::null_mut());
+  obs_ffi::obs_data_release(settings);
+
+  if capture_source.is_null() {
+    obs_ffi::obs_scene_release(scene);
+    return Err(format!("obs_source_create('{source_plugin}') devolvio null"));
+  }
+  obs_ffi::obs_scene_add(scene, capture_source);
+
+  // 4. Agregar fuentes de audio (wasapi desktop y microfonos)
   let mut audio_sources = Vec::new();
-  for entry in audio_sources_cfg.iter().take(MAX_AUDIO_SOURCES) {
+  let mut audio_volmeters = Vec::new();
+  for (idx, entry) in audio_sources_cfg.iter().enumerate() {
     let source_id = match entry.kind {
       config::AudioSourceKind::Output => "wasapi_output_capture",
       config::AudioSourceKind::Input => "wasapi_input_capture",
     };
-    let id_c = CString::new(source_id).unwrap();
-    let name_c = CString::new(entry.label.as_str()).unwrap();
+    let source_id_c = CString::new(source_id).unwrap();
+    let source_name_c = CString::new(format!("Audio Source {idx}")).unwrap();
     let settings = single_string_settings("device_id", &Some(entry.device_id.clone()));
-    let source = obs_ffi::obs_source_create(id_c.as_ptr(), name_c.as_ptr(), settings, std::ptr::null_mut());
+    let source = obs_ffi::obs_source_create(
+      source_id_c.as_ptr(),
+      source_name_c.as_ptr(),
+      settings,
+      std::ptr::null_mut(),
+    );
     if !settings.is_null() {
       obs_ffi::obs_data_release(settings);
     }
@@ -411,46 +439,57 @@ unsafe fn ensure_capture_started() -> Result<(), String> {
       for s in &audio_sources {
         obs_ffi::obs_source_release(*s);
       }
-      obs_ffi::obs_source_release(monitor_source);
+      obs_ffi::obs_source_release(capture_source);
       obs_ffi::obs_scene_release(scene);
       return Err(format!("obs_source_create('{source_id}') devolvio null para '{}'", entry.label));
     }
+    audio_sources.push(source);
+
+    // Configurar volumen inicial
     obs_ffi::obs_source_set_volume(source, entry.volume);
     obs_ffi::obs_source_set_muted(source, entry.muted);
-    audio_sources.push(source);
-  }
 
-  obs_ffi::obs_set_output_source(0, scene_source);
-  for (i, source) in audio_sources.iter().enumerate() {
-    obs_ffi::obs_set_output_source((i + 1) as u32, *source);
-  }
+    // Asignar al slot de salida del mixer OBS (1 para desktop, 2 para mic, etc.)
+    let track_num = (idx + 1) as u32;
+    if (track_num as usize) <= MAX_AUDIO_SOURCES {
+      obs_ffi::obs_set_output_source(track_num, source);
+    }
 
-  // Un volmeter por fuente para los medidores en vivo del mixer.
-  *AUDIO_LEVELS.lock().unwrap() = vec![0.0; audio_sources.len()];
-  let mut audio_volmeters = Vec::new();
-  for (i, source) in audio_sources.iter().enumerate() {
+    // Crear medidor de nivel (volmeter)
     let volmeter = obs_ffi::obs_volmeter_create(obs_ffi::obs_fader_type_OBS_FADER_LOG);
     if !volmeter.is_null() {
-      obs_ffi::obs_volmeter_attach_source(volmeter, *source);
-      obs_ffi::obs_volmeter_add_callback(volmeter, Some(volmeter_callback), i as *mut c_void);
+      if obs_ffi::obs_volmeter_attach_source(volmeter, source) {
+        obs_ffi::obs_volmeter_add_callback(volmeter, Some(volmeter_callback), idx as *mut std::ffi::c_void);
+        audio_volmeters.push(volmeter);
+      } else {
+        obs_ffi::obs_volmeter_destroy(volmeter);
+        audio_volmeters.push(std::ptr::null_mut());
+      }
+    } else {
+      audio_volmeters.push(std::ptr::null_mut());
     }
-    audio_volmeters.push(volmeter);
   }
 
-  // Recrear los overlays persistidos (imagen/texto) encima de la captura,
-  // en el mismo orden que quedaron guardados.
+  *AUDIO_LEVELS.lock().unwrap() = vec![0.0; audio_sources.len()];
+
+  // 6. Configurar salida de video del preview al output global de libobs
+  obs_ffi::obs_set_output_source(0, scene_source);
+
+  // 7. Cargar overlays persistentes en config
   let overlays_cfg = with_config(|c| c.overlays.clone());
   let mut overlays = Vec::new();
-  for cfg in &overlays_cfg {
-    match create_overlay_item(scene, cfg) {
+  for cfg in overlays_cfg {
+    match create_overlay_item(scene, &cfg) {
       Ok(item) => overlays.push(item),
-      Err(err) => log::warn!("no se pudo recrear un overlay guardado: {err}"),
+      Err(err) => {
+        log::error!("No se pudo cargar overlay persistido: {}", err);
+      }
     }
   }
 
   *CAPTURE_STATE.lock().unwrap() = Some(CaptureState {
     scene: RawPtr(scene),
-    monitor_source: RawPtr(monitor_source),
+    capture_source: RawPtr(capture_source),
     audio_sources: audio_sources.into_iter().map(RawPtr).collect(),
     audio_volmeters: audio_volmeters.into_iter().map(RawPtr).collect(),
     overlays,
@@ -487,6 +526,7 @@ unsafe fn create_overlay_item(scene: *mut obs_ffi::obs_scene_t, cfg: &config::Ov
   obs_ffi::obs_sceneitem_set_pos(item, &vec2_of(cfg.x, cfg.y) as *const _);
   obs_ffi::obs_sceneitem_set_scale(item, &vec2_of(cfg.scale, cfg.scale) as *const _);
   obs_ffi::obs_sceneitem_set_visible(item, cfg.visible);
+  obs_ffi::obs_sceneitem_set_locked(item, cfg.locked);
 
   Ok(OverlayItem { source: RawPtr(source), item: RawPtr(item) })
 }
@@ -741,7 +781,7 @@ unsafe fn cleanup_capture_if_idle() {
           obs_ffi::obs_volmeter_destroy(volmeter.0);
         }
       }
-      obs_ffi::obs_source_release(state.monitor_source.0);
+      obs_ffi::obs_source_release(state.capture_source.0);
       for source in state.audio_sources {
         obs_ffi::obs_source_release(source.0);
       }
@@ -860,30 +900,161 @@ fn list_audio_input_devices() -> Result<Vec<PropertyOption>, String> {
   }
 }
 
-/// Elegir que pantalla capturar. Si ya estas grabando, hace falta
-/// stop_recording + start_recording de nuevo para que tome el cambio (la
-/// fuente ya creada no se puede reapuntar en caliente sin reconfigurarla).
+/// Elegir que pantalla capturar.
 #[tauri::command]
 fn set_monitor(id: String) -> Result<String, String> {
-  with_config(|c| c.monitor_id = Some(id.clone()));
+  set_video_source("screen".to_string(), id)?;
+  Ok("Pantalla de captura configurada.".into())
+}
+
+#[tauri::command]
+fn set_video_source(source_type: String, source_id: String) -> Result<(), String> {
+  with_config(|c| {
+    c.video_source_type = source_type.clone();
+    c.video_source_id = Some(source_id.clone());
+  });
   persist_config();
 
   unsafe {
+    let mut guard = CAPTURE_STATE.lock().unwrap();
+    if let Some(state) = guard.as_mut() {
+      let scene = state.scene.0;
+      
+      // Eliminar la fuente vieja
+      let old_source = state.capture_source.0;
+      let name_c = obs_ffi::obs_source_get_name(old_source);
+      let old_item = obs_ffi::obs_scene_find_source_recursive(scene, name_c);
+      if !old_item.is_null() {
+        obs_ffi::obs_sceneitem_remove(old_item);
+      }
+
+      // Crear nueva fuente
+      let source_plugin = match source_type.as_str() {
+        "window" => "window_capture",
+        "game" => "game_capture",
+        _ => "monitor_capture",
+      };
+
+      let plugin_c = CString::new(source_plugin).unwrap();
+      let name_c = CString::new("Captura Principal").unwrap();
+      let settings = obs_ffi::obs_data_create();
+      let val_c = CString::new(source_id.as_str()).unwrap();
+
+      if source_plugin == "monitor_capture" {
+        let key_c = CString::new("monitor_id").unwrap();
+        obs_ffi::obs_data_set_string(settings, key_c.as_ptr(), val_c.as_ptr());
+      } else {
+        let key_c = CString::new("window").unwrap();
+        obs_ffi::obs_data_set_string(settings, key_c.as_ptr(), val_c.as_ptr());
+        if source_plugin == "game_capture" {
+          let mode_key = CString::new("capture_mode").unwrap();
+          let mode_val = CString::new("window").unwrap();
+          obs_ffi::obs_data_set_string(settings, mode_key.as_ptr(), mode_val.as_ptr());
+        }
+      }
+
+      let new_source = obs_ffi::obs_source_create(plugin_c.as_ptr(), name_c.as_ptr(), settings, std::ptr::null_mut());
+      obs_ffi::obs_data_release(settings);
+
+      if new_source.is_null() {
+        return Err("Error al crear la nueva fuente de captura".into());
+      }
+
+      let new_item = obs_ffi::obs_scene_add(scene, new_source);
+      if new_item.is_null() {
+        obs_ffi::obs_source_release(new_source);
+        return Err("Error al agregar la nueva fuente a la escena".into());
+      }
+
+      // Ubicar en el fondo (índice 0)
+      obs_ffi::obs_sceneitem_set_order_position(new_item, 0);
+
+      // Liberar fuente antigua y guardar la nueva
+      obs_ffi::obs_source_release(old_source);
+      state.capture_source = RawPtr(new_source);
+    }
+  }
+  Ok(())
+}
+
+#[tauri::command]
+fn list_windows() -> Result<Vec<PropertyOption>, String> {
+  unsafe {
+    ensure_obs_platform_initialized()?;
+    Ok(list_property_options("window_capture", "window"))
+  }
+}
+
+#[tauri::command]
+fn list_games() -> Result<Vec<PropertyOption>, String> {
+  unsafe {
+    ensure_obs_platform_initialized()?;
+    Ok(list_property_options("game_capture", "window"))
+  }
+}
+
+#[tauri::command]
+fn set_overlay_locked(index: usize, locked: bool) -> Result<Vec<OverlayInfo>, String> {
+  {
     let guard = CAPTURE_STATE.lock().unwrap();
     if let Some(state) = &*guard {
-      let source_ptr = state.monitor_source.0;
-      if !source_ptr.is_null() {
-        let settings = obs_ffi::obs_data_create();
-        let key_c = CString::new("monitor_id").unwrap();
-        let val_c = CString::new(id.as_str()).unwrap();
-        obs_ffi::obs_data_set_string(settings, key_c.as_ptr(), val_c.as_ptr());
-        obs_ffi::obs_source_update(source_ptr, settings);
-        obs_ffi::obs_data_release(settings);
+      if let Some(item) = state.overlays.get(index) {
+        unsafe { obs_ffi::obs_sceneitem_set_locked(item.item.0, locked) };
       }
     }
   }
+  with_config(|c| {
+    if let Some(o) = c.overlays.get_mut(index) {
+      o.locked = locked;
+    }
+  });
+  persist_config();
+  Ok(overlay_info_list())
+}
 
-  Ok("Pantalla actualizada.".into())
+#[tauri::command]
+fn reorder_overlay(index: usize, up: bool) -> Result<Vec<OverlayInfo>, String> {
+  unsafe {
+    let mut guard = CAPTURE_STATE.lock().unwrap();
+    if let Some(state) = guard.as_mut() {
+      let len = state.overlays.len();
+      let target_index = if up {
+        if index + 1 < len { index + 1 } else { return Err("Ya está al frente".into()); }
+      } else {
+        if index > 0 { index - 1 } else { return Err("Ya está al fondo".into()); }
+      };
+      
+      state.overlays.swap(index, target_index);
+      
+      let items_raw: Vec<*mut obs_ffi::obs_sceneitem_t> = state.overlays.iter().map(|item| item.item.0).collect();
+      obs_ffi::obs_scene_reorder_items(state.scene.0, items_raw.as_ptr() as *const _, items_raw.len());
+    }
+  }
+
+  with_config(|c| {
+    let len = c.overlays.len();
+    let target_index = if up {
+      if index + 1 < len { index + 1 } else { index }
+    } else {
+      if index > 0 { index - 1 } else { index }
+    };
+    c.overlays.swap(index, target_index);
+  });
+  persist_config();
+
+  Ok(overlay_info_list())
+}
+
+#[tauri::command]
+fn set_audio_source_label(index: usize, label: String) -> Result<Vec<config::AudioSourceConfig>, String> {
+  let list = with_config(|c| {
+    if let Some(entry) = c.audio_sources.get_mut(index) {
+      entry.label = label;
+    }
+    c.audio_sources.clone()
+  });
+  persist_config();
+  Ok(list)
 }
 
 /// Agrega una fuente de audio a la lista (hasta MAX_AUDIO_SOURCES). Pensado
@@ -980,6 +1151,7 @@ struct OverlayInfo {
   y: f32,
   scale: f32,
   visible: bool,
+  locked: bool,
 }
 
 fn overlay_kind_str(kind: config::OverlayKind) -> &'static str {
@@ -1002,6 +1174,7 @@ fn overlay_info_list() -> Vec<OverlayInfo> {
         y: o.y,
         scale: o.scale,
         visible: o.visible,
+        locked: o.locked,
       })
       .collect()
   })
@@ -1039,6 +1212,7 @@ fn add_image_overlay(path: String) -> Result<Vec<OverlayInfo>, String> {
       y: 100.0,
       scale: 1.0,
       visible: true,
+      locked: false,
     })
   }
 }
@@ -1054,6 +1228,7 @@ fn add_text_overlay(text: String) -> Result<Vec<OverlayInfo>, String> {
       y: 100.0,
       scale: 1.0,
       visible: true,
+      locked: false,
     })
   }
 }
@@ -1223,7 +1398,7 @@ fn cleanup_before_exit() {
           obs_ffi::obs_volmeter_destroy(volmeter.0);
         }
       }
-      obs_ffi::obs_source_release(state.monitor_source.0);
+      obs_ffi::obs_source_release(state.capture_source.0);
       for source in state.audio_sources {
         obs_ffi::obs_source_release(source.0);
       }
@@ -1325,6 +1500,12 @@ pub fn run() {
       list_audio_output_devices,
       list_audio_input_devices,
       set_monitor,
+      set_video_source,
+      list_windows,
+      list_games,
+      set_overlay_locked,
+      reorder_overlay,
+      set_audio_source_label,
       add_audio_source,
       remove_audio_source,
       set_audio_source_volume,
