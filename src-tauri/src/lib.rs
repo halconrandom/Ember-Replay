@@ -1,10 +1,11 @@
 mod config;
 mod obs_ffi;
+mod preview;
 
 use std::ffi::{c_void, CStr, CString};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Wrapper para poder guardar punteros crudos de libobs en un `static`.
 /// Seguro en la practica: libobs es thread-safe para estas operaciones y
@@ -23,6 +24,14 @@ struct CaptureState {
   /// Un volmeter por fuente de audio (mismo orden/indice) -- alimenta
   /// AUDIO_LEVELS para los medidores en vivo del mixer.
   audio_volmeters: Vec<RawPtr<obs_ffi::obs_volmeter_t>>,
+  /// Overlays (imagen/texto) encima de la captura, mismo orden/indice que
+  /// config.overlays.
+  overlays: Vec<OverlayItem>,
+}
+
+struct OverlayItem {
+  source: RawPtr<obs_ffi::obs_source_t>,
+  item: RawPtr<obs_ffi::obs_sceneitem_t>,
 }
 
 struct OutputState {
@@ -34,12 +43,23 @@ struct OutputState {
 
 static CAPTURE_STATE: Mutex<Option<CaptureState>> = Mutex::new(None);
 static OUTPUT_STATE: Mutex<Option<OutputState>> = Mutex::new(None);
+/// Solo `Some` mientras el preview esta activo (toggable a proposito -- ver
+/// preview.rs). None = no hay ningun `obs_display` vivo, cero costo extra.
+static PREVIEW_STATE: Mutex<Option<preview::PreviewState>> = Mutex::new(None);
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+
+pub fn emit_event<S: serde::Serialize + Clone>(event: &str, payload: S) {
+  if let Some(app) = APP_HANDLE.get() {
+    let _ = app.emit(event, payload);
+  }
+}
 static SAVE_HOTKEY_ID: Mutex<Option<obs_ffi::obs_hotkey_id>> = Mutex::new(None);
 static CONFIG: Mutex<Option<config::EmberioConfig>> = Mutex::new(None);
 /// Nivel de audio en vivo (0.0..=1.0) por indice de fuente, actualizado por
 /// los callbacks de volmeter y emitido periodicamente al frontend.
 static AUDIO_LEVELS: Mutex<Vec<f32>> = Mutex::new(Vec::new());
+static OBS_INIT_LOCK: Mutex<()> = Mutex::new(());
+
 
 const DEFAULT_HOTKEY_VK_F9: i32 = 0x78; // VK_F9
 
@@ -232,6 +252,7 @@ unsafe fn apply_video_settings() -> Result<(), String> {
   if video_result != obs_ffi::OBS_VIDEO_SUCCESS as i32 {
     return Err(format!("obs_reset_video fallo, codigo {video_result}"));
   }
+  preview::set_canvas_size(base_w, base_h);
 
   let oai = obs_ffi::obs_audio_info {
     samples_per_sec: 48000,
@@ -247,6 +268,7 @@ unsafe fn apply_video_settings() -> Result<(), String> {
 /// Arranca libobs y carga los plugins. Corre una sola vez por proceso (a
 /// diferencia de apply_video_settings, que se puede repetir).
 unsafe fn ensure_obs_platform_initialized() -> Result<(), String> {
+  let _guard = OBS_INIT_LOCK.lock().unwrap();
   if obs_ffi::obs_initialized() {
     return Ok(());
   }
@@ -283,6 +305,15 @@ unsafe fn ensure_obs_platform_initialized() -> Result<(), String> {
   obs_ffi::obs_post_load_modules();
 
   Ok(())
+}
+
+/// `vec2` es un union (con un miembro `x`/`y` anonimo y un alias `ptr:
+/// [f32;2]`) del lado de C -- construimos siempre via el miembro `ptr` para
+/// no depender del nombre exacto que bindgen le da al campo anonimo.
+unsafe fn vec2_of(x: f32, y: f32) -> obs_ffi::vec2 {
+  let mut v: obs_ffi::vec2 = std::mem::zeroed();
+  v.__bindgen_anon_1.ptr = [x, y];
+  v
 }
 
 /// Crea un `obs_data_t*` con un solo campo string (o null si `value` es None,
@@ -331,10 +362,18 @@ unsafe fn ensure_capture_started() -> Result<(), String> {
     return Ok(());
   }
 
-  let monitor_id_cfg = with_config(|c| c.monitor_id.clone());
+  let mut monitor_id_cfg = with_config(|c| c.monitor_id.clone());
+  if monitor_id_cfg.is_none() {
+    let monitors = list_property_options("monitor_capture", "monitor_id");
+    if let Some(first) = monitors.first() {
+      monitor_id_cfg = Some(first.value.clone());
+      with_config(|c| c.monitor_id = Some(first.value.clone()));
+      persist_config();
+    }
+  }
   let audio_sources_cfg = with_config(|c| c.audio_sources.clone());
 
-  let scene_name = CString::new("Emberio Scene").unwrap();
+  let scene_name = CString::new("Ember Scene").unwrap();
   let scene = obs_ffi::obs_scene_create(scene_name.as_ptr());
   if scene.is_null() {
     return Err("obs_scene_create devolvio null".into());
@@ -346,6 +385,9 @@ unsafe fn ensure_capture_started() -> Result<(), String> {
   let monitor_settings = single_string_settings("monitor_id", &monitor_id_cfg);
   let monitor_source =
     obs_ffi::obs_source_create(monitor_id.as_ptr(), monitor_name.as_ptr(), monitor_settings, std::ptr::null_mut());
+  if !monitor_settings.is_null() {
+    obs_ffi::obs_data_release(monitor_settings);
+  }
   if monitor_source.is_null() {
     obs_ffi::obs_scene_release(scene);
     return Err("obs_source_create('monitor_capture') devolvio null".into());
@@ -362,6 +404,9 @@ unsafe fn ensure_capture_started() -> Result<(), String> {
     let name_c = CString::new(entry.label.as_str()).unwrap();
     let settings = single_string_settings("device_id", &Some(entry.device_id.clone()));
     let source = obs_ffi::obs_source_create(id_c.as_ptr(), name_c.as_ptr(), settings, std::ptr::null_mut());
+    if !settings.is_null() {
+      obs_ffi::obs_data_release(settings);
+    }
     if source.is_null() {
       for s in &audio_sources {
         obs_ffi::obs_source_release(*s);
@@ -392,14 +437,58 @@ unsafe fn ensure_capture_started() -> Result<(), String> {
     audio_volmeters.push(volmeter);
   }
 
+  // Recrear los overlays persistidos (imagen/texto) encima de la captura,
+  // en el mismo orden que quedaron guardados.
+  let overlays_cfg = with_config(|c| c.overlays.clone());
+  let mut overlays = Vec::new();
+  for cfg in &overlays_cfg {
+    match create_overlay_item(scene, cfg) {
+      Ok(item) => overlays.push(item),
+      Err(err) => log::warn!("no se pudo recrear un overlay guardado: {err}"),
+    }
+  }
+
   *CAPTURE_STATE.lock().unwrap() = Some(CaptureState {
     scene: RawPtr(scene),
     monitor_source: RawPtr(monitor_source),
     audio_sources: audio_sources.into_iter().map(RawPtr).collect(),
     audio_volmeters: audio_volmeters.into_iter().map(RawPtr).collect(),
+    overlays,
   });
 
   Ok(())
+}
+
+/// Crea la fuente (imagen o texto) + el item de escena para un overlay, y le
+/// aplica su transform/visibilidad. Se usa tanto al recrear overlays
+/// persistidos como al agregar uno nuevo en caliente.
+unsafe fn create_overlay_item(scene: *mut obs_ffi::obs_scene_t, cfg: &config::OverlayConfig) -> Result<OverlayItem, String> {
+  let (source_id, settings_key) = match cfg.kind {
+    config::OverlayKind::Image => ("image_source", "file"),
+    config::OverlayKind::Text => ("text_ft2_source", "text"),
+  };
+  let id_c = CString::new(source_id).unwrap();
+  let name_c = CString::new(format!("Overlay ({source_id})")).unwrap();
+  let settings = single_string_settings(settings_key, &Some(cfg.content.clone()));
+  let source = obs_ffi::obs_source_create(id_c.as_ptr(), name_c.as_ptr(), settings, std::ptr::null_mut());
+  if !settings.is_null() {
+    obs_ffi::obs_data_release(settings);
+  }
+  if source.is_null() {
+    return Err(format!("obs_source_create('{source_id}') devolvio null"));
+  }
+
+  let item = obs_ffi::obs_scene_add(scene, source);
+  if item.is_null() {
+    obs_ffi::obs_source_release(source);
+    return Err("obs_scene_add devolvio null para el overlay".into());
+  }
+
+  obs_ffi::obs_sceneitem_set_pos(item, &vec2_of(cfg.x, cfg.y) as *const _);
+  obs_ffi::obs_sceneitem_set_scale(item, &vec2_of(cfg.scale, cfg.scale) as *const _);
+  obs_ffi::obs_sceneitem_set_visible(item, cfg.visible);
+
+  Ok(OverlayItem { source: RawPtr(source), item: RawPtr(item) })
 }
 
 unsafe fn ensure_output_started(clip_seconds: i64) -> Result<PathBuf, String> {
@@ -415,7 +504,7 @@ unsafe fn ensure_output_started(clip_seconds: i64) -> Result<PathBuf, String> {
   }
 
   let venc_id = CString::new("obs_nvenc_h264_tex").unwrap();
-  let venc_name = CString::new("Emberio Video Encoder").unwrap();
+  let venc_name = CString::new("Ember Video Encoder").unwrap();
   let video_encoder =
     obs_ffi::obs_video_encoder_create(venc_id.as_ptr(), venc_name.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
   if video_encoder.is_null() {
@@ -424,7 +513,7 @@ unsafe fn ensure_output_started(clip_seconds: i64) -> Result<PathBuf, String> {
   obs_ffi::obs_encoder_set_video(video_encoder, obs_ffi::obs_get_video());
 
   let aenc_id = CString::new("ffmpeg_aac").unwrap();
-  let aenc_name = CString::new("Emberio Audio Encoder").unwrap();
+  let aenc_name = CString::new("Ember Audio Encoder").unwrap();
   let audio_encoder =
     obs_ffi::obs_audio_encoder_create(aenc_id.as_ptr(), aenc_name.as_ptr(), std::ptr::null_mut(), 0, std::ptr::null_mut());
   if audio_encoder.is_null() {
@@ -443,7 +532,7 @@ unsafe fn ensure_output_started(clip_seconds: i64) -> Result<PathBuf, String> {
   let dir_key = CString::new("directory").unwrap();
   obs_ffi::obs_data_set_string(settings, dir_key.as_ptr(), dir_c.as_ptr());
   let fmt_key = CString::new("format").unwrap();
-  let fmt_val = CString::new("emberio-clip-%CCYY-%MM-%DD-%hh-%mm-%ss").unwrap();
+  let fmt_val = CString::new("ember-clip-%CCYY-%MM-%DD-%hh-%mm-%ss").unwrap();
   obs_ffi::obs_data_set_string(settings, fmt_key.as_ptr(), fmt_val.as_ptr());
   let ext_key = CString::new("extension").unwrap();
   let ext_val = CString::new("mp4").unwrap();
@@ -454,7 +543,7 @@ unsafe fn ensure_output_started(clip_seconds: i64) -> Result<PathBuf, String> {
   obs_ffi::obs_data_set_int(settings, max_size_key.as_ptr(), 1000);
 
   let output_id = CString::new("replay_buffer").unwrap();
-  let output_name = CString::new("Emberio Replay Buffer").unwrap();
+  let output_name = CString::new("Ember Replay Buffer").unwrap();
   let output = obs_ffi::obs_output_create(output_id.as_ptr(), output_name.as_ptr(), settings, std::ptr::null_mut());
   obs_ffi::obs_data_release(settings);
   if output.is_null() {
@@ -476,6 +565,7 @@ unsafe fn ensure_output_started(clip_seconds: i64) -> Result<PathBuf, String> {
     };
     obs_ffi::obs_encoder_release(video_encoder);
     obs_ffi::obs_encoder_release(audio_encoder);
+    obs_ffi::obs_output_release(output);
     return Err(format!("obs_output_start fallo: {err}"));
   }
 
@@ -512,7 +602,7 @@ unsafe fn ensure_save_hotkey_registered() -> obs_ffi::obs_hotkey_id {
   }
 
   let name = CString::new("emberio.save_clip").unwrap();
-  let desc = CString::new("Emberio: guardar clip").unwrap();
+  let desc = CString::new("Ember: guardar clip").unwrap();
   let id = obs_ffi::obs_hotkey_register_frontend(
     name.as_ptr(),
     desc.as_ptr(),
@@ -612,9 +702,9 @@ fn get_obs_version() -> String {
 fn start_recording(clip_seconds: i64) -> Result<String, String> {
   unsafe {
     ensure_obs_platform_initialized()?;
-    // Solo reaplicamos video/FPS/resolucion si no hay una grabacion activa
-    // ya (obs_reset_video falla si el video esta en uso).
-    if OUTPUT_STATE.lock().unwrap().is_none() {
+    // Solo reaplicamos video/FPS/resolucion si el subsistema de video de OBS no esta activo.
+    // obs_reset_video falla/crashea si hay grabacion o PREVIEW en curso.
+    if !obs_ffi::obs_video_active() {
       apply_video_settings()?;
     }
     ensure_capture_started()?;
@@ -634,14 +724,10 @@ fn start_recording(clip_seconds: i64) -> Result<String, String> {
 /// Corta la grabacion y libera todo lo creado (output, encoders, fuentes,
 /// escena). libobs en si (obs_startup) queda inicializado para poder volver
 /// a arrancar rapido con start_recording.
-#[tauri::command]
-fn stop_recording() -> Result<String, String> {
-  unsafe {
-    if let Some(state) = OUTPUT_STATE.lock().unwrap().take() {
-      obs_ffi::obs_output_stop(state.output.0);
-      obs_ffi::obs_encoder_release(state.video_encoder.0);
-      obs_ffi::obs_encoder_release(state.audio_encoder.0);
-    }
+unsafe fn cleanup_capture_if_idle() {
+  let preview_active = PREVIEW_STATE.lock().unwrap().is_some();
+  let recording_active = OUTPUT_STATE.lock().unwrap().is_some();
+  if !preview_active && !recording_active {
     if let Some(state) = CAPTURE_STATE.lock().unwrap().take() {
       obs_ffi::obs_set_output_source(0, std::ptr::null_mut());
       for i in 1..=MAX_AUDIO_SOURCES {
@@ -659,9 +745,25 @@ fn stop_recording() -> Result<String, String> {
       for source in state.audio_sources {
         obs_ffi::obs_source_release(source.0);
       }
+      for overlay in state.overlays {
+        obs_ffi::obs_source_release(overlay.source.0);
+      }
       obs_ffi::obs_scene_release(state.scene.0);
     }
     AUDIO_LEVELS.lock().unwrap().clear();
+  }
+}
+
+#[tauri::command]
+fn stop_recording() -> Result<String, String> {
+  unsafe {
+    if let Some(state) = OUTPUT_STATE.lock().unwrap().take() {
+      obs_ffi::obs_output_stop(state.output.0);
+      obs_ffi::obs_output_release(state.output.0);
+      obs_ffi::obs_encoder_release(state.video_encoder.0);
+      obs_ffi::obs_encoder_release(state.audio_encoder.0);
+    }
+    cleanup_capture_if_idle();
   }
   Ok("Grabacion detenida y recursos liberados".into())
 }
@@ -763,9 +865,25 @@ fn list_audio_input_devices() -> Result<Vec<PropertyOption>, String> {
 /// fuente ya creada no se puede reapuntar en caliente sin reconfigurarla).
 #[tauri::command]
 fn set_monitor(id: String) -> Result<String, String> {
-  with_config(|c| c.monitor_id = Some(id));
+  with_config(|c| c.monitor_id = Some(id.clone()));
   persist_config();
-  Ok("Pantalla guardada. Si ya estabas grabando, deteni y volve a empezar para que tome el cambio.".into())
+
+  unsafe {
+    let guard = CAPTURE_STATE.lock().unwrap();
+    if let Some(state) = &*guard {
+      let source_ptr = state.monitor_source.0;
+      if !source_ptr.is_null() {
+        let settings = obs_ffi::obs_data_create();
+        let key_c = CString::new("monitor_id").unwrap();
+        let val_c = CString::new(id.as_str()).unwrap();
+        obs_ffi::obs_data_set_string(settings, key_c.as_ptr(), val_c.as_ptr());
+        obs_ffi::obs_source_update(source_ptr, settings);
+        obs_ffi::obs_data_release(settings);
+      }
+    }
+  }
+
+  Ok("Pantalla actualizada.".into())
 }
 
 /// Agrega una fuente de audio a la lista (hasta MAX_AUDIO_SOURCES). Pensado
@@ -849,6 +967,221 @@ fn set_audio_source_muted(index: usize, muted: bool) -> Result<Vec<config::Audio
   Ok(list)
 }
 
+// ---------------------------------------------------------------------------
+// Fuentes de escena: overlays simples (imagen/texto) encima de la captura.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, Clone)]
+struct OverlayInfo {
+  index: usize,
+  kind: String,
+  content: String,
+  x: f32,
+  y: f32,
+  scale: f32,
+  visible: bool,
+}
+
+fn overlay_kind_str(kind: config::OverlayKind) -> &'static str {
+  match kind {
+    config::OverlayKind::Image => "image",
+    config::OverlayKind::Text => "text",
+  }
+}
+
+fn overlay_info_list() -> Vec<OverlayInfo> {
+  with_config(|c| {
+    c.overlays
+      .iter()
+      .enumerate()
+      .map(|(index, o)| OverlayInfo {
+        index,
+        kind: overlay_kind_str(o.kind).to_string(),
+        content: o.content.clone(),
+        x: o.x,
+        y: o.y,
+        scale: o.scale,
+        visible: o.visible,
+      })
+      .collect()
+  })
+}
+
+#[tauri::command]
+fn list_overlays() -> Vec<OverlayInfo> {
+  overlay_info_list()
+}
+
+unsafe fn add_overlay(cfg: config::OverlayConfig) -> Result<Vec<OverlayInfo>, String> {
+  ensure_obs_platform_initialized()?;
+  ensure_capture_started()?;
+
+  let scene = match &*CAPTURE_STATE.lock().unwrap() {
+    Some(state) => state.scene.0,
+    None => return Err("La captura todavia no esta lista".into()),
+  };
+  let item = create_overlay_item(scene, &cfg)?;
+  CAPTURE_STATE.lock().unwrap().as_mut().unwrap().overlays.push(item);
+  with_config(|c| c.overlays.push(cfg));
+  persist_config();
+  Ok(overlay_info_list())
+}
+
+/// Agrega un overlay de imagen (logo, marco, etc). `path` es una ruta de
+/// archivo absoluta (el frontend la saca del dialogo nativo de archivos).
+#[tauri::command]
+fn add_image_overlay(path: String) -> Result<Vec<OverlayInfo>, String> {
+  unsafe {
+    add_overlay(config::OverlayConfig {
+      kind: config::OverlayKind::Image,
+      content: path,
+      x: 100.0,
+      y: 100.0,
+      scale: 1.0,
+      visible: true,
+    })
+  }
+}
+
+/// Agrega un overlay de texto simple (fuente/color por defecto de libobs).
+#[tauri::command]
+fn add_text_overlay(text: String) -> Result<Vec<OverlayInfo>, String> {
+  unsafe {
+    add_overlay(config::OverlayConfig {
+      kind: config::OverlayKind::Text,
+      content: text,
+      x: 100.0,
+      y: 100.0,
+      scale: 1.0,
+      visible: true,
+    })
+  }
+}
+
+#[tauri::command]
+fn remove_overlay(index: usize) -> Result<Vec<OverlayInfo>, String> {
+  unsafe {
+    let mut guard = CAPTURE_STATE.lock().unwrap();
+    if let Some(state) = guard.as_mut() {
+      if index < state.overlays.len() {
+        let item = state.overlays.remove(index);
+        obs_ffi::obs_sceneitem_remove(item.item.0);
+        obs_ffi::obs_source_release(item.source.0);
+      }
+    }
+  }
+  with_config(|c| {
+    if index < c.overlays.len() {
+      c.overlays.remove(index);
+    }
+  });
+  persist_config();
+  Ok(overlay_info_list())
+}
+
+#[tauri::command]
+fn set_overlay_visible(index: usize, visible: bool) -> Result<Vec<OverlayInfo>, String> {
+  {
+    let guard = CAPTURE_STATE.lock().unwrap();
+    if let Some(state) = &*guard {
+      if let Some(item) = state.overlays.get(index) {
+        unsafe { obs_ffi::obs_sceneitem_set_visible(item.item.0, visible) };
+      }
+    }
+  }
+  with_config(|c| {
+    if let Some(o) = c.overlays.get_mut(index) {
+      o.visible = visible;
+    }
+  });
+  persist_config();
+  Ok(overlay_info_list())
+}
+
+/// Reposiciona/escala un overlay ya creado (posicion en pixeles del canvas
+/// base, escala uniforme 0.1..=5.0).
+#[tauri::command]
+fn set_overlay_transform(index: usize, x: f32, y: f32, scale: f32) -> Result<Vec<OverlayInfo>, String> {
+  {
+    let guard = CAPTURE_STATE.lock().unwrap();
+    if let Some(state) = &*guard {
+      if let Some(item) = state.overlays.get(index) {
+        unsafe {
+          obs_ffi::obs_sceneitem_set_pos(item.item.0, &vec2_of(x, y) as *const _);
+          obs_ffi::obs_sceneitem_set_scale(item.item.0, &vec2_of(scale, scale) as *const _);
+        }
+      }
+    }
+  }
+  with_config(|c| {
+    if let Some(o) = c.overlays.get_mut(index) {
+      o.x = x;
+      o.y = y;
+      o.scale = scale;
+    }
+  });
+  persist_config();
+  Ok(overlay_info_list())
+}
+
+// ---------------------------------------------------------------------------
+// Preview en vivo (toggable -- ver preview.rs para el por que).
+// ---------------------------------------------------------------------------
+
+/// Prende o apaga el preview. Al prenderlo crea la ventana nativa + el
+/// `obs_display` de libobs sobre el rectangulo indicado (coordenadas de
+/// cliente de la ventana principal, en pixeles fisicos); al apagarlo los
+/// destruye. Sin esto activo no hay ningun costo extra de renderizado.
+#[tauri::command]
+fn toggle_preview(enabled: bool, x: i32, y: i32, width: i32, height: i32) -> Result<(), String> {
+  unsafe {
+    if enabled {
+      ensure_obs_platform_initialized()?;
+      ensure_capture_started()?;
+      if PREVIEW_STATE.lock().unwrap().is_some() {
+        return Ok(());
+      }
+      let app = APP_HANDLE.get().ok_or("La app todavia no esta lista")?;
+      let window = app.get_webview_window("main").ok_or("No se encontro la ventana principal")?;
+      let hwnd = window.hwnd().map_err(|e| format!("no se pudo obtener el HWND de la ventana: {e}"))?;
+      let state = preview::create(hwnd.0 as windows_sys::Win32::Foundation::HWND, x, y, width, height)?;
+      *PREVIEW_STATE.lock().unwrap() = Some(state);
+    } else if let Some(state) = PREVIEW_STATE.lock().unwrap().take() {
+      preview::destroy(state);
+      cleanup_capture_if_idle();
+    }
+  }
+  Ok(())
+}
+
+/// Actualiza el rectangulo del preview (ej. al resizear la ventana). No hace
+/// nada si el preview esta apagado.
+#[tauri::command]
+fn update_preview_rect(x: i32, y: i32, width: i32, height: i32) -> Result<(), String> {
+  unsafe {
+    let guard = PREVIEW_STATE.lock().unwrap();
+    if let Some(state) = &*guard {
+      let app = APP_HANDLE.get().ok_or("La app todavia no esta lista")?;
+      let window = app.get_webview_window("main").ok_or("No se encontro la ventana principal")?;
+      let hwnd = window.hwnd().map_err(|e| format!("no se pudo obtener el HWND: {e}"))?;
+      preview::resize(state, hwnd.0 as windows_sys::Win32::Foundation::HWND, x, y, width, height);
+    }
+  }
+  Ok(())
+}
+
+#[tauri::command]
+fn set_preview_grid(grid: String) -> Result<(), String> {
+  preview::set_grid(grid);
+  Ok(())
+}
+
+#[tauri::command]
+fn reset_preview_zoom() -> Result<(), String> {
+  preview::reset_zoom();
+  Ok(())
+}
+
 #[tauri::command]
 fn set_theme(theme: String) -> Result<(), String> {
   with_config(|c| c.theme = theme);
@@ -876,6 +1209,29 @@ fn set_fps(fps: i64) -> Result<(), String> {
 fn cleanup_before_exit() {
   let _ = stop_recording();
   unsafe {
+    if let Some(state) = PREVIEW_STATE.lock().unwrap().take() {
+      preview::destroy(state);
+    }
+    if let Some(state) = CAPTURE_STATE.lock().unwrap().take() {
+      obs_ffi::obs_set_output_source(0, std::ptr::null_mut());
+      for i in 1..=MAX_AUDIO_SOURCES {
+        obs_ffi::obs_set_output_source(i as u32, std::ptr::null_mut());
+      }
+      for volmeter in state.audio_volmeters {
+        if !volmeter.0.is_null() {
+          obs_ffi::obs_volmeter_detach_source(volmeter.0);
+          obs_ffi::obs_volmeter_destroy(volmeter.0);
+        }
+      }
+      obs_ffi::obs_source_release(state.monitor_source.0);
+      for source in state.audio_sources {
+        obs_ffi::obs_source_release(source.0);
+      }
+      for overlay in state.overlays {
+        obs_ffi::obs_source_release(overlay.source.0);
+      }
+      obs_ffi::obs_scene_release(state.scene.0);
+    }
     if obs_ffi::obs_initialized() {
       obs_ffi::obs_shutdown();
     }
@@ -915,15 +1271,23 @@ pub fn run() {
         }
       });
 
-      let show_item = MenuItem::with_id(app, "show", "Mostrar Emberio", true, None::<&str>)?;
+      let show_item = MenuItem::with_id(app, "show", "Mostrar Ember", true, None::<&str>)?;
       let quit_item = MenuItem::with_id(app, "quit", "Salir (corta la grabacion)", true, None::<&str>)?;
       let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
+      let icon = match app.default_window_icon() {
+        Some(icon) => icon.clone(),
+        None => {
+          tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))
+            .unwrap_or_else(|_| tauri::image::Image::new(&[0, 0, 0, 0], 1, 1))
+        }
+      };
+
       TrayIconBuilder::new()
-        .icon(app.default_window_icon().unwrap().clone())
+        .icon(icon)
         .menu(&menu)
         .show_menu_on_left_click(true)
-        .tooltip("Emberio")
+        .tooltip("Ember")
         .on_menu_event(|app, event| match event.id.as_ref() {
           "show" => {
             if let Some(window) = app.get_webview_window("main") {
@@ -967,7 +1331,17 @@ pub fn run() {
       set_audio_source_muted,
       set_theme,
       set_resolution,
-      set_fps
+      set_fps,
+      list_overlays,
+      add_image_overlay,
+      add_text_overlay,
+      remove_overlay,
+      set_overlay_visible,
+      set_overlay_transform,
+      toggle_preview,
+      update_preview_rect,
+      set_preview_grid,
+      reset_preview_zoom
     ])
     .build(tauri::generate_context!())
     .expect("error while building tauri application")
