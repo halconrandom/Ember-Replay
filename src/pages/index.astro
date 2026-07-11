@@ -457,9 +457,22 @@ import '../styles/global.css';
 					const dx = e.clientX - startX;
 					let newWidth = startWidth + dx;
 					
-					// Limitar tamaño entre 240px y 500px para que encaje en el layout
-					if (newWidth < 240) newWidth = 240;
-					if (newWidth > 500) newWidth = 500;
+					// Calcular límites dinámicos basándose en el tamaño de la ventana y el alto disponible
+					const leftCol = previewSurface.closest(".flex-col") as HTMLElement;
+					const leftColHeight = leftCol ? leftCol.offsetHeight : 400;
+					
+					// El panel de capas necesita al menos 80px de altura disponible
+					const maxPreviewPanelHeight = leftColHeight - 80;
+					// El panel de preview ocupa: alto_surface + 32px (toolbar) + 16px (padding/margins) = surface_height + 48px
+					const maxSurfaceHeight = maxPreviewPanelHeight - 48;
+					const maxWBasedOnHeight = Math.floor(maxSurfaceHeight * 16 / 9);
+					
+					// Asegurar al menos 320px de ancho para el mezclador y la columna derecha
+					const maxAllowedWidth = Math.min(window.innerWidth - 340, maxWBasedOnHeight);
+					const minAllowedWidth = 240;
+					
+					if (newWidth < minAllowedWidth) newWidth = minAllowedWidth;
+					if (newWidth > maxAllowedWidth) newWidth = maxAllowedWidth;
 					
 					previewSurface.style.width = `${newWidth}px`;
 					previewSurface.style.height = `${Math.round(newWidth * 9 / 16)}px`;
