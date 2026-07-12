@@ -144,8 +144,11 @@ fn init_native_hotkey_thread() {
 
     *HOTKEY_HWND.lock().unwrap() = Some(SendHWND(hwnd));
 
+    // Despertar la ventana para procesar cualquier comando de hotkey encolado durante el arranque
+    PostMessageW(hwnd, WM_USER, 0, 0);
+
     let mut msg: MSG = std::mem::zeroed();
-    while GetMessageW(&mut msg, hwnd, 0, 0) != 0 {
+    while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 {
       if msg.message == WM_USER {
         while let Ok(cmd) = rx.try_recv() {
           match cmd {
