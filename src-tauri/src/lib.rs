@@ -55,6 +55,7 @@ pub fn emit_event<S: serde::Serialize + Clone>(event: &str, payload: S) {
 }
 static SAVE_HOTKEY_ID: Mutex<Option<obs_ffi::obs_hotkey_id>> = Mutex::new(None);
 static CONFIG: Mutex<Option<config::EmberioConfig>> = Mutex::new(None);
+static CONFIG_SAVE_TX: OnceLock<std::sync::mpsc::Sender<config::EmberioConfig>> = OnceLock::new();
 /// Nivel de audio en vivo (0.0..=1.0) por indice de fuente, actualizado por
 /// los callbacks de volmeter y emitido periodicamente al frontend.
 static AUDIO_LEVELS: Mutex<Vec<f32>> = Mutex::new(Vec::new());
@@ -94,9 +95,9 @@ fn with_config<R>(f: impl FnOnce(&mut config::EmberioConfig) -> R) -> R {
 }
 
 fn persist_config() {
-  if let Some(app) = APP_HANDLE.get() {
+  if let Some(tx) = CONFIG_SAVE_TX.get() {
     let cfg = CONFIG.lock().unwrap().clone().unwrap_or_default();
-    config::save(app, &cfg);
+    let _ = tx.send(cfg);
   }
 }
 
@@ -175,8 +176,14 @@ struct PropertyOption {
 
 unsafe fn list_property_options(source_id: &str, property_key: &str) -> Vec<PropertyOption> {
   let id_c = CString::new(source_id).unwrap();
-  let props = obs_ffi::obs_get_source_properties(id_c.as_ptr());
+  let source = obs_ffi::obs_source_create_private(id_c.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+  if source.is_null() {
+    return vec![];
+  }
+
+  let props = obs_ffi::obs_source_properties(source);
   if props.is_null() {
+    obs_ffi::obs_source_release(source);
     return vec![];
   }
 
@@ -204,6 +211,7 @@ unsafe fn list_property_options(source_id: &str, property_key: &str) -> Vec<Prop
   }
 
   obs_ffi::obs_properties_destroy(props);
+  obs_ffi::obs_source_release(source);
   result
 }
 
@@ -487,13 +495,16 @@ unsafe fn ensure_capture_started() -> Result<(), String> {
     }
   }
 
-  *CAPTURE_STATE.lock().unwrap() = Some(CaptureState {
+  let mut capture_state = CaptureState {
     scene: RawPtr(scene),
     capture_source: RawPtr(capture_source),
     audio_sources: audio_sources.into_iter().map(RawPtr).collect(),
     audio_volmeters: audio_volmeters.into_iter().map(RawPtr).collect(),
     overlays,
-  });
+  };
+  sync_scene_z_order(&mut capture_state);
+
+  *CAPTURE_STATE.lock().unwrap() = Some(capture_state);
 
   Ok(())
 }
@@ -529,6 +540,24 @@ unsafe fn create_overlay_item(scene: *mut obs_ffi::obs_scene_t, cfg: &config::Ov
   obs_ffi::obs_sceneitem_set_locked(item, cfg.locked);
 
   Ok(OverlayItem { source: RawPtr(source), item: RawPtr(item) })
+}
+
+unsafe fn sync_scene_z_order(state: &mut CaptureState) {
+  let mut items_raw: Vec<*mut obs_ffi::obs_sceneitem_t> = Vec::new();
+  
+  // Prepend main capture source item so it remains at the very bottom (Z-index 0)
+  let name_c = obs_ffi::obs_source_get_name(state.capture_source.0);
+  let main_item = obs_ffi::obs_scene_find_source_recursive(state.scene.0, name_c);
+  if !main_item.is_null() {
+    items_raw.push(main_item);
+  }
+  
+  // Append overlays in reverse order of the list (index 0 is front-most, index len-1 is back-most)
+  for overlay in state.overlays.iter().rev() {
+    items_raw.push(overlay.item.0);
+  }
+  
+  obs_ffi::obs_scene_reorder_items(state.scene.0, items_raw.as_ptr() as *const _, items_raw.len());
 }
 
 unsafe fn ensure_output_started(clip_seconds: i64) -> Result<PathBuf, String> {
@@ -877,7 +906,7 @@ fn get_config() -> config::EmberioConfig {
 /// configuracion de OBS: EnumDisplayMonitors corre en vivo al pedir las
 /// propiedades de "monitor_capture").
 #[tauri::command]
-fn list_monitors() -> Result<Vec<PropertyOption>, String> {
+async fn list_monitors() -> Result<Vec<PropertyOption>, String> {
   unsafe {
     ensure_obs_platform_initialized()?;
     Ok(list_property_options("monitor_capture", "monitor_id"))
@@ -885,7 +914,7 @@ fn list_monitors() -> Result<Vec<PropertyOption>, String> {
 }
 
 #[tauri::command]
-fn list_audio_output_devices() -> Result<Vec<PropertyOption>, String> {
+async fn list_audio_output_devices() -> Result<Vec<PropertyOption>, String> {
   unsafe {
     ensure_obs_platform_initialized()?;
     Ok(list_property_options("wasapi_output_capture", "device_id"))
@@ -893,7 +922,7 @@ fn list_audio_output_devices() -> Result<Vec<PropertyOption>, String> {
 }
 
 #[tauri::command]
-fn list_audio_input_devices() -> Result<Vec<PropertyOption>, String> {
+async fn list_audio_input_devices() -> Result<Vec<PropertyOption>, String> {
   unsafe {
     ensure_obs_platform_initialized()?;
     Ok(list_property_options("wasapi_input_capture", "device_id"))
@@ -902,13 +931,13 @@ fn list_audio_input_devices() -> Result<Vec<PropertyOption>, String> {
 
 /// Elegir que pantalla capturar.
 #[tauri::command]
-fn set_monitor(id: String) -> Result<String, String> {
-  set_video_source("screen".to_string(), id)?;
+async fn set_monitor(id: String) -> Result<String, String> {
+  set_video_source("screen".to_string(), id).await?;
   Ok("Pantalla de captura configurada.".into())
 }
 
 #[tauri::command]
-fn set_video_source(source_type: String, source_id: String) -> Result<(), String> {
+async fn set_video_source(source_type: String, source_id: String) -> Result<(), String> {
   with_config(|c| {
     c.video_source_type = source_type.clone();
     c.video_source_id = Some(source_id.clone());
@@ -978,7 +1007,7 @@ fn set_video_source(source_type: String, source_id: String) -> Result<(), String
 }
 
 #[tauri::command]
-fn list_windows() -> Result<Vec<PropertyOption>, String> {
+async fn list_windows() -> Result<Vec<PropertyOption>, String> {
   unsafe {
     ensure_obs_platform_initialized()?;
     Ok(list_property_options("window_capture", "window"))
@@ -986,7 +1015,7 @@ fn list_windows() -> Result<Vec<PropertyOption>, String> {
 }
 
 #[tauri::command]
-fn list_games() -> Result<Vec<PropertyOption>, String> {
+async fn list_games() -> Result<Vec<PropertyOption>, String> {
   unsafe {
     ensure_obs_platform_initialized()?;
     Ok(list_property_options("game_capture", "window"))
@@ -994,7 +1023,7 @@ fn list_games() -> Result<Vec<PropertyOption>, String> {
 }
 
 #[tauri::command]
-fn set_overlay_locked(index: usize, locked: bool) -> Result<Vec<OverlayInfo>, String> {
+async fn set_overlay_locked(index: usize, locked: bool) -> Result<Vec<OverlayInfo>, String> {
   {
     let guard = CAPTURE_STATE.lock().unwrap();
     if let Some(state) = &*guard {
@@ -1013,43 +1042,28 @@ fn set_overlay_locked(index: usize, locked: bool) -> Result<Vec<OverlayInfo>, St
 }
 
 #[tauri::command]
-fn reorder_overlay(index: usize, up: bool) -> Result<Vec<OverlayInfo>, String> {
+async fn reorder_overlay(index: usize, up: bool) -> Result<Vec<OverlayInfo>, String> {
   unsafe {
     let mut guard = CAPTURE_STATE.lock().unwrap();
     if let Some(state) = guard.as_mut() {
       let len = state.overlays.len();
       let target_index = if up {
-        if index + 1 < len { index + 1 } else { return Err("Ya está al frente".into()); }
+        if index > 0 { index - 1 } else { return Err("Ya está al frente".into()); }
       } else {
-        if index > 0 { index - 1 } else { return Err("Ya está al fondo".into()); }
+        if index + 1 < len { index + 1 } else { return Err("Ya está al fondo".into()); }
       };
       
       state.overlays.swap(index, target_index);
-      
-      let mut items_raw: Vec<*mut obs_ffi::obs_sceneitem_t> = Vec::new();
-      
-      // Prepend main capture source item so it remains at the very bottom (Z-index 0)
-      let name_c = obs_ffi::obs_source_get_name(state.capture_source.0);
-      let main_item = obs_ffi::obs_scene_find_source_recursive(state.scene.0, name_c);
-      if !main_item.is_null() {
-        items_raw.push(main_item);
-      }
-      
-      // Append overlays
-      for overlay in &state.overlays {
-        items_raw.push(overlay.item.0);
-      }
-      
-      obs_ffi::obs_scene_reorder_items(state.scene.0, items_raw.as_ptr() as *const _, items_raw.len());
+      sync_scene_z_order(state);
     }
   }
 
   with_config(|c| {
     let len = c.overlays.len();
     let target_index = if up {
-      if index + 1 < len { index + 1 } else { index }
-    } else {
       if index > 0 { index - 1 } else { index }
+    } else {
+      if index + 1 < len { index + 1 } else { index }
     };
     c.overlays.swap(index, target_index);
   });
@@ -1059,7 +1073,7 @@ fn reorder_overlay(index: usize, up: bool) -> Result<Vec<OverlayInfo>, String> {
 }
 
 #[tauri::command]
-fn set_audio_source_label(index: usize, label: String) -> Result<Vec<config::AudioSourceConfig>, String> {
+async fn set_audio_source_label(index: usize, label: String) -> Result<Vec<config::AudioSourceConfig>, String> {
   let list = with_config(|c| {
     if let Some(entry) = c.audio_sources.get_mut(index) {
       entry.label = label;
@@ -1074,7 +1088,7 @@ fn set_audio_source_label(index: usize, label: String) -> Result<Vec<config::Aud
 /// para setups tipo Voicemeeter con varios buses virtuales que se quieren
 /// capturar todos a la vez, cada uno en su propio canal.
 #[tauri::command]
-fn add_audio_source(kind: String, device_id: String, label: String) -> Result<Vec<config::AudioSourceConfig>, String> {
+async fn add_audio_source(kind: String, device_id: String, label: String) -> Result<Vec<config::AudioSourceConfig>, String> {
   let kind = match kind.as_str() {
     "output" => config::AudioSourceKind::Output,
     "input" => config::AudioSourceKind::Input,
@@ -1099,7 +1113,7 @@ fn add_audio_source(kind: String, device_id: String, label: String) -> Result<Ve
 }
 
 #[tauri::command]
-fn remove_audio_source(index: usize) -> Result<Vec<config::AudioSourceConfig>, String> {
+async fn remove_audio_source(index: usize) -> Result<Vec<config::AudioSourceConfig>, String> {
   let list = with_config(|c| {
     if index < c.audio_sources.len() {
       c.audio_sources.remove(index);
@@ -1114,7 +1128,7 @@ fn remove_audio_source(index: usize) -> Result<Vec<config::AudioSourceConfig>, S
 /// grabacion esta activa, tambien lo aplica en vivo sobre la fuente real
 /// (sin necesidad de reiniciar), igual que el mixer de OBS.
 #[tauri::command]
-fn set_audio_source_volume(index: usize, volume: f32) -> Result<Vec<config::AudioSourceConfig>, String> {
+async fn set_audio_source_volume(index: usize, volume: f32) -> Result<Vec<config::AudioSourceConfig>, String> {
   let list = with_config(|c| {
     if let Some(entry) = c.audio_sources.get_mut(index) {
       entry.volume = volume;
@@ -1133,7 +1147,7 @@ fn set_audio_source_volume(index: usize, volume: f32) -> Result<Vec<config::Audi
 }
 
 #[tauri::command]
-fn set_audio_source_muted(index: usize, muted: bool) -> Result<Vec<config::AudioSourceConfig>, String> {
+async fn set_audio_source_muted(index: usize, muted: bool) -> Result<Vec<config::AudioSourceConfig>, String> {
   let list = with_config(|c| {
     if let Some(entry) = c.audio_sources.get_mut(index) {
       entry.muted = muted;
@@ -1207,8 +1221,14 @@ unsafe fn add_overlay(cfg: config::OverlayConfig) -> Result<Vec<OverlayInfo>, St
     None => return Err("La captura todavia no esta lista".into()),
   };
   let item = create_overlay_item(scene, &cfg)?;
-  CAPTURE_STATE.lock().unwrap().as_mut().unwrap().overlays.push(item);
-  with_config(|c| c.overlays.push(cfg));
+  {
+    let mut guard = CAPTURE_STATE.lock().unwrap();
+    if let Some(state) = guard.as_mut() {
+      state.overlays.insert(0, item);
+      sync_scene_z_order(state);
+    }
+  }
+  with_config(|c| c.overlays.insert(0, cfg));
   persist_config();
   Ok(overlay_info_list())
 }
@@ -1216,7 +1236,7 @@ unsafe fn add_overlay(cfg: config::OverlayConfig) -> Result<Vec<OverlayInfo>, St
 /// Agrega un overlay de imagen (logo, marco, etc). `path` es una ruta de
 /// archivo absoluta (el frontend la saca del dialogo nativo de archivos).
 #[tauri::command]
-fn add_image_overlay(path: String) -> Result<Vec<OverlayInfo>, String> {
+async fn add_image_overlay(path: String) -> Result<Vec<OverlayInfo>, String> {
   unsafe {
     add_overlay(config::OverlayConfig {
       kind: config::OverlayKind::Image,
@@ -1232,7 +1252,7 @@ fn add_image_overlay(path: String) -> Result<Vec<OverlayInfo>, String> {
 
 /// Agrega un overlay de texto simple (fuente/color por defecto de libobs).
 #[tauri::command]
-fn add_text_overlay(text: String) -> Result<Vec<OverlayInfo>, String> {
+async fn add_text_overlay(text: String) -> Result<Vec<OverlayInfo>, String> {
   unsafe {
     add_overlay(config::OverlayConfig {
       kind: config::OverlayKind::Text,
@@ -1247,7 +1267,7 @@ fn add_text_overlay(text: String) -> Result<Vec<OverlayInfo>, String> {
 }
 
 #[tauri::command]
-fn remove_overlay(index: usize) -> Result<Vec<OverlayInfo>, String> {
+async fn remove_overlay(index: usize) -> Result<Vec<OverlayInfo>, String> {
   unsafe {
     let mut guard = CAPTURE_STATE.lock().unwrap();
     if let Some(state) = guard.as_mut() {
@@ -1255,6 +1275,7 @@ fn remove_overlay(index: usize) -> Result<Vec<OverlayInfo>, String> {
         let item = state.overlays.remove(index);
         obs_ffi::obs_sceneitem_remove(item.item.0);
         obs_ffi::obs_source_release(item.source.0);
+        sync_scene_z_order(state);
       }
     }
   }
@@ -1268,7 +1289,7 @@ fn remove_overlay(index: usize) -> Result<Vec<OverlayInfo>, String> {
 }
 
 #[tauri::command]
-fn set_overlay_visible(index: usize, visible: bool) -> Result<Vec<OverlayInfo>, String> {
+async fn set_overlay_visible(index: usize, visible: bool) -> Result<Vec<OverlayInfo>, String> {
   {
     let guard = CAPTURE_STATE.lock().unwrap();
     if let Some(state) = &*guard {
@@ -1289,7 +1310,7 @@ fn set_overlay_visible(index: usize, visible: bool) -> Result<Vec<OverlayInfo>, 
 /// Reposiciona/escala un overlay ya creado (posicion en pixeles del canvas
 /// base, escala uniforme 0.1..=5.0).
 #[tauri::command]
-fn set_overlay_transform(index: usize, x: f32, y: f32, scale: f32) -> Result<Vec<OverlayInfo>, String> {
+async fn set_overlay_transform(index: usize, x: f32, y: f32, scale: f32) -> Result<Vec<OverlayInfo>, String> {
   {
     let guard = CAPTURE_STATE.lock().unwrap();
     if let Some(state) = &*guard {
@@ -1371,7 +1392,7 @@ fn reset_preview_zoom() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_theme(theme: String) -> Result<(), String> {
+async fn set_theme(theme: String) -> Result<(), String> {
   with_config(|c| c.theme = theme);
   persist_config();
   Ok(())
@@ -1381,14 +1402,14 @@ fn set_theme(theme: String) -> Result<(), String> {
 /// stop_recording + start_recording (obs_reset_video no se puede llamar con
 /// el video activo).
 #[tauri::command]
-fn set_resolution(resolution: String) -> Result<(), String> {
+async fn set_resolution(resolution: String) -> Result<(), String> {
   with_config(|c| c.resolution = resolution);
   persist_config();
   Ok(())
 }
 
 #[tauri::command]
-fn set_fps(fps: i64) -> Result<(), String> {
+async fn set_fps(fps: i64) -> Result<(), String> {
   with_config(|c| c.fps = fps);
   persist_config();
   Ok(())
@@ -1435,6 +1456,19 @@ pub fn run() {
   tauri::Builder::default()
     .plugin(tauri_plugin_dialog::init())
     .setup(|app| {
+      let (tx, rx) = std::sync::mpsc::channel::<config::EmberioConfig>();
+      let _ = CONFIG_SAVE_TX.set(tx);
+      let app_handle_clone = app.handle().clone();
+      std::thread::spawn(move || {
+        while let Ok(cfg) = rx.recv() {
+          let mut latest_cfg = cfg;
+          while let Ok(next_cfg) = rx.try_recv() {
+            latest_cfg = next_cfg;
+          }
+          config::save(&app_handle_clone, &latest_cfg);
+        }
+      });
+
       if cfg!(debug_assertions) {
         app.handle().plugin(
           tauri_plugin_log::Builder::default()
