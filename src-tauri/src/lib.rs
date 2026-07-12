@@ -241,6 +241,7 @@ fn create_native_overlay_window(app: &AppHandle, window_id: &str, route: &str, w
   .decorations(false)
   .transparent(true)
   .always_on_top(true)
+  .skip_taskbar(true)
   .shadow(false);
 
   if let Ok(win) = builder.build() {
@@ -262,10 +263,8 @@ fn show_toast_notification(app: &AppHandle, clip_time: i64) {
   play_notification_sound();
 
   let route = format!("toast?time={clip_time}");
-  if let Some(win) = app.get_webview_window("clip_toast") {
+  if let Some(_) = app.get_webview_window("clip_toast") {
     let _ = app.emit("show-toast", clip_time);
-    let _ = win.show();
-    let _ = win.set_focus();
     return;
   }
 
@@ -274,10 +273,8 @@ fn show_toast_notification(app: &AppHandle, clip_time: i64) {
 
 fn show_status_notification(app: &AppHandle, active: bool) {
   let route = format!("status_toast?active={active}");
-  if let Some(win) = app.get_webview_window("status_toast") {
+  if let Some(_) = app.get_webview_window("status_toast") {
     let _ = app.emit("show-status", active);
-    let _ = win.show();
-    let _ = win.set_focus();
     return;
   }
 
