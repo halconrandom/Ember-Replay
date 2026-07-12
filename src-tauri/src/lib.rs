@@ -278,7 +278,7 @@ fn show_status_notification(app: &AppHandle, active: bool) {
     return;
   }
 
-  create_native_overlay_window(app, "status_toast", &route, 200.0, 44.0, 140.0);
+  create_native_overlay_window(app, "status_toast", &route, 24.0, 24.0, 55.0);
 }
 
 /// Resolucion del monitor principal, usada como canvas base de libobs.
@@ -2001,6 +2001,9 @@ pub fn run() {
       } else {
         register_native_hotkey(2, DEFAULT_TOGGLE_HOTKEY_VK_F10, false, false, false);
       }
+
+      // Inicializar el indicador de estado permanente en la esquina inferior derecha (inicia en rojo)
+      show_status_notification(app.handle(), false);
 
       // Inicializar libobs y arrancar la captura en segundo plano
       tauri::async_runtime::spawn(async {

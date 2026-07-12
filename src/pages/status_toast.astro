@@ -5,60 +5,37 @@ import '../styles/global.css';
 <html lang="es" class="bg-transparent h-full select-none overflow-hidden">
 	<head>
 		<meta charset="utf-8" />
-		<title>Ember Status</title>
+		<title>Ember Status Indicator</title>
 	</head>
-	<body class="bg-transparent m-0 h-full w-full flex items-center justify-end pr-4">
-		<!-- Tiny Xbox-like Status Pill -->
-		<div id="status-pill" class="hidden bg-zinc-950/95 border border-zinc-800/90 rounded-full px-3 py-1.5 flex items-center gap-2 shadow-xl translate-x-[300px] opacity-0 transition-all duration-300 backdrop-blur-md">
-			<div id="status-dot" class="w-2 h-2 rounded-full animate-pulse"></div>
-			<span id="status-text" class="text-[10px] font-bold text-zinc-200 tracking-wider">Ember</span>
-		</div>
+	<body class="bg-transparent m-0 h-full w-full flex items-center justify-center">
+		<!-- Tiny circular status dot -->
+		<div 
+			id="status-dot" 
+			class="w-3.5 h-3.5 rounded-full bg-red-500 border border-red-400/40 shadow-[0_0_8px_rgba(239,68,68,0.8)] transition-all duration-500 ease-in-out"
+		></div>
 
 		<script>
 			import { listen } from "@tauri-apps/api/event";
-			import { getCurrentWindow } from "@tauri-apps/api/window";
 
-			const win = getCurrentWindow();
-			const pill = document.getElementById("status-pill")!;
 			const dot = document.getElementById("status-dot")!;
-			const text = document.getElementById("status-text")!;
-			let hideTimeout: number;
 
-			function triggerStatus(active: boolean) {
+			function updateStatus(active: boolean) {
 				if (active) {
-					dot.className = "w-2 h-2 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_6px_rgba(16,185,129,0.8)]";
-					text.textContent = "Grabación Iniciada";
+					dot.className = "w-3.5 h-3.5 rounded-full bg-emerald-500 border border-emerald-400/40 shadow-[0_0_8px_rgba(16,185,129,0.9)] transition-all duration-500 ease-in-out";
 				} else {
-					dot.className = "w-2 h-2 rounded-full bg-red-500 animate-pulse shadow-[0_0_6px_rgba(239,68,68,0.8)]";
-					text.textContent = "Grabación Finalizada";
+					dot.className = "w-3.5 h-3.5 rounded-full bg-red-500 border border-red-400/40 shadow-[0_0_8px_rgba(239,68,68,0.9)] transition-all duration-500 ease-in-out";
 				}
-
-				clearTimeout(hideTimeout);
-				pill.classList.remove("hidden");
-				void pill.offsetWidth;
-
-				pill.classList.remove("translate-x-[300px]", "opacity-0");
-				pill.classList.add("translate-x-0", "opacity-100");
-
-				hideTimeout = window.setTimeout(() => {
-					pill.classList.remove("translate-x-0", "opacity-100");
-					pill.classList.add("translate-x-[300px]", "opacity-0");
-
-					setTimeout(() => {
-						pill.classList.add("hidden");
-					}, 300);
-				}, 3000);
 			}
 
-			// Verificar parametros de carga
+			// Check URL parameter on load
 			const params = new URLSearchParams(window.location.search);
 			const activeParam = params.get("active");
 			if (activeParam !== null) {
-				triggerStatus(activeParam === "true");
+				updateStatus(activeParam === "true");
 			}
 
 			listen<boolean>("show-status", (event) => {
-				triggerStatus(event.payload);
+				updateStatus(event.payload);
 			});
 		</script>
 	</body>
