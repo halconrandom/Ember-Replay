@@ -33,6 +33,35 @@ pub static PREVIEW_PARAMS: Mutex<PreviewParams> = Mutex::new(PreviewParams {
 static LAST_MOUSE: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 static SELECTED_OVERLAY: Mutex<Option<usize>> = Mutex::new(None);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ResizeCorner {
+  TopLeft,
+  TopRight,
+  BottomLeft,
+  BottomRight,
+}
+
+pub enum DragAction {
+  None,
+  Pan,
+  MoveOverlay(usize),
+  ResizeOverlay {
+    index: usize,
+    corner: ResizeCorner,
+    aspect_ratio: f32,
+    initial_x: f32,
+    initial_y: f32,
+    initial_scale_x: f32,
+    initial_scale_y: f32,
+    initial_w: f32,
+    initial_h: f32,
+    click_canvas_x: f32,
+    click_canvas_y: f32,
+  }
+}
+
+static DRAG_ACTION: Mutex<DragAction> = Mutex::new(DragAction::None);
+
 /// Resolucion base actual del canvas de OBS.
 static CANVAS_SIZE: Mutex<(u32, u32)> = Mutex::new((1920, 1080));
 
@@ -81,6 +110,32 @@ pub fn client_to_canvas(click_x: i32, click_y: i32, cx: i32, cy: i32) -> Option<
   }
 }
 
+fn check_corner_click(canvas_x: f32, canvas_y: f32, x: f32, y: f32, w: f32, h: f32, zoom: f32) -> Option<ResizeCorner> {
+  let threshold = 12.0 / zoom;
+  let threshold_sq = threshold * threshold;
+
+  let dist_sq = |cx: f32, cy: f32| {
+    let dx = canvas_x - cx;
+    let dy = canvas_y - cy;
+    dx * dx + dy * dy
+  };
+
+  if dist_sq(x, y) < threshold_sq {
+    return Some(ResizeCorner::TopLeft);
+  }
+  if dist_sq(x + w, y) < threshold_sq {
+    return Some(ResizeCorner::TopRight);
+  }
+  if dist_sq(x, y + h) < threshold_sq {
+    return Some(ResizeCorner::BottomLeft);
+  }
+  if dist_sq(x + w, y + h) < threshold_sq {
+    return Some(ResizeCorner::BottomRight);
+  }
+
+  None
+}
+
 pub fn set_canvas_size(w: u32, h: u32) {
   *CANVAS_SIZE.lock().unwrap() = (w, h);
 }
@@ -118,6 +173,71 @@ pub fn reset_zoom() {
   emit_preview_params_change();
 }
 
+unsafe fn draw_selection_box(x: f32, y: f32, w: f32, h: f32, base_h: u32) {
+  let effect = obs_ffi::obs_get_base_effect(obs_ffi::obs_base_effect_OBS_EFFECT_SOLID);
+  if effect.is_null() {
+    return;
+  }
+  let technique = obs_ffi::gs_effect_get_technique(effect, b"Solid\0".as_ptr() as *const _);
+  let color_param = obs_ffi::gs_effect_get_param_by_name(effect, b"color\0".as_ptr() as *const _);
+  if technique.is_null() || color_param.is_null() {
+    return;
+  }
+
+  // Border color: Vibrant Orange (0.88, 0.35, 0.06, 0.9)
+  let border_color = vec4_of(0.88, 0.35, 0.06, 0.9);
+  obs_ffi::gs_effect_set_vec4(color_param, &border_color as *const _);
+
+  // Convert to bottom-up coordinates for drawing
+  let left = x;
+  let right = x + w;
+  let bottom = base_h as f32 - (y + h);
+  let top = base_h as f32 - y;
+
+  let passes = obs_ffi::gs_technique_begin(technique);
+  for i in 0..passes {
+    obs_ffi::gs_technique_begin_pass(technique, i);
+    obs_ffi::gs_render_start(true);
+
+    // Draw selection border (rectangle)
+    obs_ffi::gs_vertex2f(left, top);
+    obs_ffi::gs_vertex2f(right, top);
+
+    obs_ffi::gs_vertex2f(right, top);
+    obs_ffi::gs_vertex2f(right, bottom);
+
+    obs_ffi::gs_vertex2f(right, bottom);
+    obs_ffi::gs_vertex2f(left, bottom);
+
+    obs_ffi::gs_vertex2f(left, bottom);
+    obs_ffi::gs_vertex2f(left, top);
+
+    // Corner handle size in canvas pixels (e.g. 6 pixels)
+    let hs = 6.0;
+
+    // Draw 4 square handles at the corners using lines
+    for cx in &[left, right] {
+      for cy in &[bottom, top] {
+        obs_ffi::gs_vertex2f(cx - hs, cy - hs);
+        obs_ffi::gs_vertex2f(cx + hs, cy - hs);
+
+        obs_ffi::gs_vertex2f(cx + hs, cy - hs);
+        obs_ffi::gs_vertex2f(cx + hs, cy + hs);
+
+        obs_ffi::gs_vertex2f(cx + hs, cy + hs);
+        obs_ffi::gs_vertex2f(cx - hs, cy + hs);
+
+        obs_ffi::gs_vertex2f(cx - hs, cy + hs);
+        obs_ffi::gs_vertex2f(cx - hs, cy - hs);
+      }
+    }
+
+    obs_ffi::gs_render_stop(obs_ffi::gs_draw_mode_GS_LINES);
+    obs_ffi::gs_technique_end_pass(technique);
+  }
+  obs_ffi::gs_technique_end(technique);
+}
+
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
   match msg {
     windows_sys::Win32::UI::WindowsAndMessaging::WM_LBUTTONDOWN => {
@@ -130,11 +250,48 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
       let cx = rect.right - rect.left;
       let cy = rect.bottom - rect.top;
 
+      let zoom = PREVIEW_PARAMS.lock().unwrap().zoom;
+
       if let Some((canvas_x, canvas_y)) = client_to_canvas(x, y, cx, cy) {
-        let selected = crate::try_select_overlay(canvas_x, canvas_y);
-        *SELECTED_OVERLAY.lock().unwrap() = selected;
+        // First check if they clicked a corner of the CURRENTLY selected overlay
+        let current_selected = *SELECTED_OVERLAY.lock().unwrap();
+        let mut drag_started = false;
+        
+        if let Some(index) = current_selected {
+          if let Some((ox, oy, ow, oh)) = crate::get_overlay_rect(index) {
+            if let Some(corner) = check_corner_click(canvas_x, canvas_y, ox, oy, ow, oh, zoom) {
+              let (w_orig, h_orig, sx, sy) = crate::get_overlay_source_dims_and_scale(index).unwrap_or((1.0, 1.0, 1.0, 1.0));
+              *DRAG_ACTION.lock().unwrap() = DragAction::ResizeOverlay {
+                index,
+                corner,
+                aspect_ratio: w_orig / h_orig,
+                initial_x: ox,
+                initial_y: oy,
+                initial_scale_x: sx,
+                initial_scale_y: sy,
+                initial_w: ow,
+                initial_h: oh,
+                click_canvas_x: canvas_x,
+                click_canvas_y: canvas_y,
+              };
+              drag_started = true;
+            }
+          }
+        }
+        
+        if !drag_started {
+          // Check if they clicked a new overlay
+          if let Some(index) = crate::try_select_overlay(canvas_x, canvas_y) {
+            *SELECTED_OVERLAY.lock().unwrap() = Some(index);
+            *DRAG_ACTION.lock().unwrap() = DragAction::MoveOverlay(index);
+          } else {
+            *SELECTED_OVERLAY.lock().unwrap() = None;
+            *DRAG_ACTION.lock().unwrap() = DragAction::Pan;
+          }
+        }
       } else {
         *SELECTED_OVERLAY.lock().unwrap() = None;
+        *DRAG_ACTION.lock().unwrap() = DragAction::Pan;
       }
       0
     }
@@ -143,25 +300,33 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
       let y = ((lparam >> 16) & 0xffff) as i16 as i32;
       *LAST_MOUSE.lock().unwrap() = Some((x, y));
       *SELECTED_OVERLAY.lock().unwrap() = None;
+      *DRAG_ACTION.lock().unwrap() = DragAction::Pan;
       0
     }
     windows_sys::Win32::UI::WindowsAndMessaging::WM_LBUTTONUP => {
       *LAST_MOUSE.lock().unwrap() = None;
-      let mut selected_guard = SELECTED_OVERLAY.lock().unwrap();
-      if selected_guard.is_some() {
-        *selected_guard = None;
-        crate::finish_drag_overlay();
+      let mut drag_action = DRAG_ACTION.lock().unwrap();
+      match *drag_action {
+        DragAction::MoveOverlay(_) | DragAction::ResizeOverlay { .. } => {
+          *drag_action = DragAction::None;
+          crate::finish_drag_overlay();
+        }
+        _ => {
+          *drag_action = DragAction::None;
+        }
       }
       0
     }
     windows_sys::Win32::UI::WindowsAndMessaging::WM_MBUTTONUP => {
       *LAST_MOUSE.lock().unwrap() = None;
+      *DRAG_ACTION.lock().unwrap() = DragAction::None;
       0
     }
     windows_sys::Win32::UI::WindowsAndMessaging::WM_MOUSEMOVE => {
       let wparam_u = wparam as usize;
       let left_down = (wparam_u & 0x0001) != 0;
       let middle_down = (wparam_u & 0x0010) != 0;
+      let shift_down = (wparam_u & 0x0004) != 0; // MK_SHIFT
       
       let x = (lparam & 0xffff) as i16 as i32;
       let y = ((lparam >> 16) & 0xffff) as i16 as i32;
@@ -172,12 +337,49 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
           let dx = x - last_x;
           let dy = y - last_y;
           if dx != 0 || dy != 0 {
-            let selected_guard = SELECTED_OVERLAY.lock().unwrap();
-            if let Some(index) = *selected_guard {
-              if left_down {
+            let drag_action = DRAG_ACTION.lock().unwrap();
+            
+            // If middle button is down, we always force Pan
+            let current_action = if middle_down { DragAction::Pan } else {
+              match *drag_action {
+                DragAction::None => DragAction::Pan,
+                ref other => match other {
+                  DragAction::MoveOverlay(idx) => DragAction::MoveOverlay(*idx),
+                  DragAction::ResizeOverlay {
+                    index,
+                    corner,
+                    aspect_ratio,
+                    initial_x,
+                    initial_y,
+                    initial_scale_x,
+                    initial_scale_y,
+                    initial_w,
+                    initial_h,
+                    click_canvas_x,
+                    click_canvas_y,
+                  } => DragAction::ResizeOverlay {
+                    index: *index,
+                    corner: *corner,
+                    aspect_ratio: *aspect_ratio,
+                    initial_x: *initial_x,
+                    initial_y: *initial_y,
+                    initial_scale_x: *initial_scale_x,
+                    initial_scale_y: *initial_scale_y,
+                    initial_w: *initial_w,
+                    initial_h: *initial_h,
+                    click_canvas_x: *click_canvas_x,
+                    click_canvas_y: *click_canvas_y,
+                  },
+                  _ => DragAction::Pan,
+                }
+              }
+            };
+
+            match current_action {
+              DragAction::MoveOverlay(index) => {
                 let (base_w, base_h) = *CANVAS_SIZE.lock().unwrap();
                 let mut rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
-                windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect);
+                unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect); }
                 let cx = rect.right - rect.left;
                 let cy = rect.bottom - rect.top;
                 
@@ -190,13 +392,88 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
                   crate::drag_selected_overlay(index, dx_canvas, dy_canvas);
                 }
               }
-            } else {
-              let mut params = PREVIEW_PARAMS.lock().unwrap();
-              let scale_factor = params.zoom;
-              params.pan_x += (dx as f32) / scale_factor;
-              params.pan_y -= (dy as f32) / scale_factor;
-              drop(params);
-              emit_preview_params_change();
+              DragAction::ResizeOverlay {
+                index,
+                corner,
+                aspect_ratio,
+                initial_x,
+                initial_y,
+                initial_scale_x: _,
+                initial_scale_y: _,
+                initial_w,
+                initial_h,
+                click_canvas_x,
+                click_canvas_y,
+              } => {
+                let mut rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
+                unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect); }
+                let cx = rect.right - rect.left;
+                let cy = rect.bottom - rect.top;
+                
+                if let Some((canvas_x, canvas_y)) = client_to_canvas(x, y, cx, cy) {
+                  let dx_canvas = canvas_x - click_canvas_x;
+                  let dy_canvas = canvas_y - click_canvas_y;
+
+                  let (w_orig, h_orig, _, _) = crate::get_overlay_source_dims_and_scale(index).unwrap_or((1.0, 1.0, 1.0, 1.0));
+
+                  let mut new_x = initial_x;
+                  let mut new_y = initial_y;
+                  let mut new_w;
+                  let mut new_h;
+
+                  match corner {
+                    ResizeCorner::BottomRight => {
+                      new_w = initial_w + dx_canvas;
+                      new_h = initial_h + dy_canvas;
+                    }
+                    ResizeCorner::TopRight => {
+                      new_w = initial_w + dx_canvas;
+                      new_h = initial_h - dy_canvas;
+                      new_y = (initial_y + initial_h) - new_h;
+                    }
+                    ResizeCorner::BottomLeft => {
+                      new_w = initial_w - dx_canvas;
+                      new_h = initial_h + dy_canvas;
+                      new_x = (initial_x + initial_w) - new_w;
+                    }
+                    ResizeCorner::TopLeft => {
+                      new_w = initial_w - dx_canvas;
+                      new_h = initial_h - dy_canvas;
+                      new_x = (initial_x + initial_w) - new_w;
+                      new_y = (initial_y + initial_h) - new_h;
+                    }
+                  }
+
+                  new_w = new_w.max(10.0);
+                  new_h = new_h.max(10.0);
+
+                  // Default is proportional resize (Shift NOT down)
+                  if !shift_down {
+                    match corner {
+                      ResizeCorner::BottomRight | ResizeCorner::BottomLeft => {
+                        new_h = new_w / aspect_ratio;
+                      }
+                      ResizeCorner::TopRight | ResizeCorner::TopLeft => {
+                        new_h = new_w / aspect_ratio;
+                        new_y = (initial_y + initial_h) - new_h;
+                      }
+                    }
+                  }
+
+                  let scale_x = new_w / w_orig;
+                  let scale_y = new_h / h_orig;
+
+                  crate::resize_selected_overlay(index, new_x, new_y, scale_x, scale_y);
+                }
+              }
+              _ => {
+                let mut params = PREVIEW_PARAMS.lock().unwrap();
+                let scale_factor = params.zoom;
+                params.pan_x += (dx as f32) / scale_factor;
+                params.pan_y -= (dy as f32) / scale_factor;
+                drop(params);
+                emit_preview_params_change();
+              }
             }
             *last_mouse = Some((x, y));
           }
@@ -368,6 +645,14 @@ extern "C" fn render_preview_callback(_param: *mut c_void, cx: u32, cy: u32) {
     // Dibujar cuadrícula de guía
     draw_grid_lines(base_w, base_h, &grid_type);
 
+    // Draw overlay selection box
+    let selected = *SELECTED_OVERLAY.lock().unwrap();
+    if let Some(index) = selected {
+      if let Some((ox, oy, ow, oh)) = crate::get_overlay_rect(index) {
+        draw_selection_box(ox, oy, ow, oh, base_h);
+      }
+    }
+
     obs_ffi::gs_projection_pop();
     obs_ffi::gs_viewport_pop();
   }
@@ -406,7 +691,7 @@ pub unsafe fn create(parent_hwnd: HWND, x: i32, y: i32, w: i32, h: i32) -> Resul
     cx: w as u32,
     cy: h as u32,
     num_backbuffers: 2,
-    format: obs_ffi::gs_color_format_GS_BGRA,
+    format: obs_ffi::gs_color_format_GS_RGBA,
     zsformat: obs_ffi::gs_zstencil_format_GS_ZS_NONE,
     adapter: 0,
   };

@@ -176,7 +176,9 @@ struct PropertyOption {
 
 unsafe fn list_property_options(source_id: &str, property_key: &str) -> Vec<PropertyOption> {
   let id_c = CString::new(source_id).unwrap();
-  let source = obs_ffi::obs_source_create_private(id_c.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+  let settings = obs_ffi::obs_data_create();
+  let source = obs_ffi::obs_source_create_private(id_c.as_ptr(), std::ptr::null(), settings);
+  obs_ffi::obs_data_release(settings);
   if source.is_null() {
     return vec![];
   }
@@ -535,7 +537,7 @@ unsafe fn create_overlay_item(scene: *mut obs_ffi::obs_scene_t, cfg: &config::Ov
   }
 
   obs_ffi::obs_sceneitem_set_pos(item, &vec2_of(cfg.x, cfg.y) as *const _);
-  obs_ffi::obs_sceneitem_set_scale(item, &vec2_of(cfg.scale, cfg.scale) as *const _);
+  obs_ffi::obs_sceneitem_set_scale(item, &vec2_of(cfg.get_scale_x(), cfg.get_scale_y()) as *const _);
   obs_ffi::obs_sceneitem_set_visible(item, cfg.visible);
   obs_ffi::obs_sceneitem_set_locked(item, cfg.locked);
 
@@ -610,6 +612,56 @@ pub(crate) fn finish_drag_overlay() {
   if let Some(app) = APP_HANDLE.get() {
     let list = overlay_info_list();
     let _ = app.emit("overlays-updated", list);
+  }
+}
+
+pub(crate) unsafe fn get_overlay_source_dims_and_scale(index: usize) -> Option<(f32, f32, f32, f32)> {
+  let guard = CAPTURE_STATE.lock().unwrap();
+  let state = guard.as_ref()?;
+  let config_guard = CONFIG.lock().unwrap();
+  let config = config_guard.as_ref()?;
+  
+  let overlay = state.overlays.get(index)?;
+  let cfg = config.overlays.get(index)?;
+  
+  let w = obs_ffi::obs_source_get_width(overlay.source.0) as f32;
+  let h = obs_ffi::obs_source_get_height(overlay.source.0) as f32;
+  
+  Some((w, h, cfg.get_scale_x(), cfg.get_scale_y()))
+}
+
+pub(crate) unsafe fn get_overlay_rect(index: usize) -> Option<(f32, f32, f32, f32)> {
+  let guard = CAPTURE_STATE.lock().unwrap();
+  let state = guard.as_ref()?;
+  let config_guard = CONFIG.lock().unwrap();
+  let config = config_guard.as_ref()?;
+  
+  let overlay = state.overlays.get(index)?;
+  let cfg = config.overlays.get(index)?;
+  
+  let w = obs_ffi::obs_source_get_width(overlay.source.0) as f32;
+  let h = obs_ffi::obs_source_get_height(overlay.source.0) as f32;
+  
+  Some((cfg.x, cfg.y, w * cfg.get_scale_x(), h * cfg.get_scale_y()))
+}
+
+pub(crate) unsafe fn resize_selected_overlay(index: usize, x: f32, y: f32, scale_x: f32, scale_y: f32) {
+  let mut guard = CAPTURE_STATE.lock().unwrap();
+  if let Some(state) = guard.as_mut() {
+    if let Some(overlay) = state.overlays.get(index) {
+      let mut config_guard = CONFIG.lock().unwrap();
+      if let Some(config) = config_guard.as_mut() {
+        if let Some(cfg) = config.overlays.get_mut(index) {
+          cfg.x = x;
+          cfg.y = y;
+          cfg.scale_x = scale_x;
+          cfg.scale_y = scale_y;
+          cfg.scale = scale_x; // sync legacy scale
+          obs_ffi::obs_sceneitem_set_pos(overlay.item.0, &vec2_of(x, y) as *const _);
+          obs_ffi::obs_sceneitem_set_scale(overlay.item.0, &vec2_of(scale_x, scale_y) as *const _);
+        }
+      }
+    }
   }
 }
 
@@ -1230,6 +1282,8 @@ struct OverlayInfo {
   x: f32,
   y: f32,
   scale: f32,
+  scale_x: f32,
+  scale_y: f32,
   visible: bool,
   locked: bool,
 }
@@ -1253,6 +1307,8 @@ fn overlay_info_list() -> Vec<OverlayInfo> {
         x: o.x,
         y: o.y,
         scale: o.scale,
+        scale_x: o.get_scale_x(),
+        scale_y: o.get_scale_y(),
         visible: o.visible,
         locked: o.locked,
       })
@@ -1297,6 +1353,8 @@ async fn add_image_overlay(path: String) -> Result<Vec<OverlayInfo>, String> {
       x: 100.0,
       y: 100.0,
       scale: 1.0,
+      scale_x: 1.0,
+      scale_y: 1.0,
       visible: true,
       locked: false,
     })
@@ -1313,6 +1371,8 @@ async fn add_text_overlay(text: String) -> Result<Vec<OverlayInfo>, String> {
       x: 100.0,
       y: 100.0,
       scale: 1.0,
+      scale_x: 1.0,
+      scale_y: 1.0,
       visible: true,
       locked: false,
     })
@@ -1363,14 +1423,14 @@ async fn set_overlay_visible(index: usize, visible: bool) -> Result<Vec<OverlayI
 /// Reposiciona/escala un overlay ya creado (posicion en pixeles del canvas
 /// base, escala uniforme 0.1..=5.0).
 #[tauri::command]
-async fn set_overlay_transform(index: usize, x: f32, y: f32, scale: f32) -> Result<Vec<OverlayInfo>, String> {
+async fn set_overlay_transform(index: usize, x: f32, y: f32, scale_x: f32, scale_y: f32) -> Result<Vec<OverlayInfo>, String> {
   {
     let guard = CAPTURE_STATE.lock().unwrap();
     if let Some(state) = &*guard {
       if let Some(item) = state.overlays.get(index) {
         unsafe {
           obs_ffi::obs_sceneitem_set_pos(item.item.0, &vec2_of(x, y) as *const _);
-          obs_ffi::obs_sceneitem_set_scale(item.item.0, &vec2_of(scale, scale) as *const _);
+          obs_ffi::obs_sceneitem_set_scale(item.item.0, &vec2_of(scale_x, scale_y) as *const _);
         }
       }
     }
@@ -1379,7 +1439,9 @@ async fn set_overlay_transform(index: usize, x: f32, y: f32, scale: f32) -> Resu
     if let Some(o) = c.overlays.get_mut(index) {
       o.x = x;
       o.y = y;
-      o.scale = scale;
+      o.scale_x = scale_x;
+      o.scale_y = scale_y;
+      o.scale = scale_x; // sync legacy scale
     }
   });
   persist_config();

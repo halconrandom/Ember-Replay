@@ -58,10 +58,23 @@ pub struct OverlayConfig {
   pub y: f32,
   #[serde(default = "default_overlay_scale")]
   pub scale: f32,
+  #[serde(default = "default_overlay_scale")]
+  pub scale_x: f32,
+  #[serde(default = "default_overlay_scale")]
+  pub scale_y: f32,
   #[serde(default = "default_overlay_visible")]
   pub visible: bool,
   #[serde(default = "default_overlay_locked")]
   pub locked: bool,
+}
+
+impl OverlayConfig {
+  pub fn get_scale_x(&self) -> f32 {
+    if self.scale_x == 1.0 && self.scale != 1.0 { self.scale } else { self.scale_x }
+  }
+  pub fn get_scale_y(&self) -> f32 {
+    if self.scale_y == 1.0 && self.scale != 1.0 { self.scale } else { self.scale_y }
+  }
 }
 
 fn default_overlay_locked() -> bool {

@@ -318,7 +318,8 @@ import '../styles/global.css';
 				
 				<input type="number" class="overlay-x w-11 bg-zinc-900 border border-zinc-700/60 text-zinc-300 text-[10px] rounded px-1 py-0.5 text-center focus:outline-none shrink-0" title="Posicion X" />
 				<input type="number" class="overlay-y w-11 bg-zinc-900 border border-zinc-700/60 text-zinc-300 text-[10px] rounded px-1 py-0.5 text-center focus:outline-none shrink-0" title="Posicion Y" />
-				<input type="number" step="0.1" min="0.1" max="5" class="overlay-scale w-12 bg-zinc-900 border border-zinc-700/60 text-zinc-300 text-[10px] rounded px-1 py-0.5 text-center focus:outline-none shrink-0" title="Escala" />
+				<input type="number" step="0.01" min="0.01" max="10" class="overlay-scale-x w-11 bg-zinc-900 border border-zinc-700/60 text-zinc-300 text-[10px] rounded px-1 py-0.5 text-center focus:outline-none shrink-0" title="Escala X" />
+				<input type="number" step="0.01" min="0.01" max="10" class="overlay-scale-y w-11 bg-zinc-900 border border-zinc-700/60 text-zinc-300 text-[10px] rounded px-1 py-0.5 text-center focus:outline-none shrink-0" title="Escala Y" />
 				
 				<button class="overlay-toggle-lock text-zinc-500 hover:text-zinc-200 transition-colors shrink-0 cursor-pointer" aria-label="Bloquear/desbloquear">
 					<!-- Candado se inyecta dinamicamente -->
@@ -361,6 +362,8 @@ import '../styles/global.css';
 				x: number;
 				y: number;
 				scale: number;
+				scale_x: number;
+				scale_y: number;
 				visible: boolean;
 				locked: boolean;
 			}
@@ -971,27 +974,32 @@ import '../styles/global.css';
 
 					const xInput = node.querySelector(".overlay-x") as HTMLInputElement;
 					const yInput = node.querySelector(".overlay-y") as HTMLInputElement;
-					const scaleInput = node.querySelector(".overlay-scale") as HTMLInputElement;
+					const scaleXInput = node.querySelector(".overlay-scale-x") as HTMLInputElement;
+					const scaleYInput = node.querySelector(".overlay-scale-y") as HTMLInputElement;
 					xInput.value = String(Math.round(overlay.x));
 					yInput.value = String(Math.round(overlay.y));
-					scaleInput.value = String(overlay.scale);
+					scaleXInput.value = String(overlay.scale_x.toFixed(2));
+					scaleYInput.value = String(overlay.scale_y.toFixed(2));
 
 					if (overlay.locked) {
 						xInput.disabled = true;
 						yInput.disabled = true;
-						scaleInput.disabled = true;
+						scaleXInput.disabled = true;
+						scaleYInput.disabled = true;
 						itemEl.classList.add("border-orange-500/20");
 					}
 
 					async function pushTransform() {
 						const x = Number(xInput.value) || 0;
 						const y = Number(yInput.value) || 0;
-						const scale = Number(scaleInput.value) || 1;
-						await invoke("set_overlay_transform", { index: overlay.index, x, y, scale });
+						const scaleX = Number(scaleXInput.value) || 1;
+						const scaleY = Number(scaleYInput.value) || 1;
+						await invoke("set_overlay_transform", { index: overlay.index, x, y, scaleX, scaleY });
 					}
 					xInput.addEventListener("change", pushTransform);
 					yInput.addEventListener("change", pushTransform);
-					scaleInput.addEventListener("change", pushTransform);
+					scaleXInput.addEventListener("change", pushTransform);
+					scaleYInput.addEventListener("change", pushTransform);
 
 					const lockBtn = node.querySelector(".overlay-toggle-lock") as HTMLButtonElement;
 					lockBtn.innerHTML = overlay.locked 
