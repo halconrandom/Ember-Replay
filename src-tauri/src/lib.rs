@@ -263,7 +263,7 @@ fn show_toast_notification(app: &AppHandle, clip_time: i64) {
 
   let route = format!("toast?time={clip_time}");
   if let Some(win) = app.get_webview_window("clip_toast") {
-    let _ = win.emit("show-toast", clip_time);
+    let _ = app.emit("show-toast", clip_time);
     let _ = win.show();
     let _ = win.set_focus();
     return;
@@ -275,7 +275,7 @@ fn show_toast_notification(app: &AppHandle, clip_time: i64) {
 fn show_status_notification(app: &AppHandle, active: bool) {
   let route = format!("status_toast?active={active}");
   if let Some(win) = app.get_webview_window("status_toast") {
-    let _ = win.emit("show-status", active);
+    let _ = app.emit("show-status", active);
     let _ = win.show();
     let _ = win.set_focus();
     return;
