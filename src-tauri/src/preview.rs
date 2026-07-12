@@ -570,44 +570,6 @@ unsafe fn vec4_of(r: f32, g: f32, b: f32, a: f32) -> obs_ffi::vec4 {
   v
 }
 
-unsafe fn draw_canvas_border(base_w: u32, base_h: u32) {
-  let effect = obs_ffi::obs_get_base_effect(obs_ffi::obs_base_effect_OBS_EFFECT_SOLID);
-  if effect.is_null() {
-    return;
-  }
-  let technique = obs_ffi::gs_effect_get_technique(effect, b"Solid\0".as_ptr() as *const _);
-  let color_param = obs_ffi::gs_effect_get_param_by_name(effect, b"color\0".as_ptr() as *const _);
-  if technique.is_null() || color_param.is_null() {
-    return;
-  }
-
-  // Border color: Subtle canvas outline gray (0.25, 0.25, 0.25, 0.8)
-  let border_color = vec4_of(0.25, 0.25, 0.25, 0.8);
-  obs_ffi::gs_effect_set_vec4(color_param, &border_color as *const _);
-
-  let passes = obs_ffi::gs_technique_begin(technique);
-  for i in 0..passes {
-    obs_ffi::gs_technique_begin_pass(technique, i);
-    obs_ffi::gs_render_start(true);
-
-    obs_ffi::gs_vertex2f(0.0, 0.0);
-    obs_ffi::gs_vertex2f(base_w as f32, 0.0);
-
-    obs_ffi::gs_vertex2f(base_w as f32, 0.0);
-    obs_ffi::gs_vertex2f(base_w as f32, base_h as f32);
-
-    obs_ffi::gs_vertex2f(base_w as f32, base_h as f32);
-    obs_ffi::gs_vertex2f(0.0, base_h as f32);
-
-    obs_ffi::gs_vertex2f(0.0, base_h as f32);
-    obs_ffi::gs_vertex2f(0.0, 0.0);
-
-    obs_ffi::gs_render_stop(obs_ffi::gs_draw_mode_GS_LINES);
-    obs_ffi::gs_technique_end_pass(technique);
-  }
-  obs_ffi::gs_technique_end(technique);
-}
-
 unsafe fn draw_grid_lines(base_w: u32, base_h: u32, grid_type: &str) {
   if grid_type == "none" || grid_type.is_empty() {
     return;
@@ -631,7 +593,20 @@ unsafe fn draw_grid_lines(base_w: u32, base_h: u32, grid_type: &str) {
     obs_ffi::gs_technique_begin_pass(technique, i);
     obs_ffi::gs_render_start(true);
 
-    // Líneas divisorias internas
+    // 1. Contorno del Canvas
+    obs_ffi::gs_vertex2f(0.0, 0.0);
+    obs_ffi::gs_vertex2f(base_w as f32, 0.0);
+
+    obs_ffi::gs_vertex2f(base_w as f32, 0.0);
+    obs_ffi::gs_vertex2f(base_w as f32, base_h as f32);
+
+    obs_ffi::gs_vertex2f(base_w as f32, base_h as f32);
+    obs_ffi::gs_vertex2f(0.0, base_h as f32);
+
+    obs_ffi::gs_vertex2f(0.0, base_h as f32);
+    obs_ffi::gs_vertex2f(0.0, 0.0);
+
+    // 2. Líneas divisorias internas
     let divisions = match grid_type {
       "thirds" => 3,
       "grid10" => 10,
@@ -696,9 +671,6 @@ extern "C" fn render_preview_callback(_param: *mut c_void, cx: u32, cy: u32) {
     // OBS Studio.
     obs_ffi::obs_render_main_texture();
 
-    // Dibujar el contorno del lienzo (canvas border) siempre visible
-    draw_canvas_border(base_w, base_h);
-
     // Dibujar cuadricula de guia
     draw_grid_lines(base_w, base_h, &grid_type);
 
@@ -752,9 +724,9 @@ pub unsafe fn create(parent_hwnd: HWND, x: i32, y: i32, w: i32, h: i32) -> Resul
     adapter: 0,
   };
   // Color de fondo del display: libobs lo interpreta como 0xAABBGGRR (RGBA
-  // little-endian, R en el byte bajo). Para que contraste con el lienzo negro,
-  // usamos un gris oscuro (#18181b -> 0xFF1B1818):
-  let display = obs_ffi::obs_display_create(&mut init_data as *const _, 0xFF1B1818);
+  // little-endian, R en el byte bajo). 0xFFFF0000 era AZUL opaco -- la
+  // famosa "pantalla azul" cuando la captura no entrega frames. Negro opaco:
+  let display = obs_ffi::obs_display_create(&mut init_data as *const _, 0xFF000000);
   if display.is_null() {
     DestroyWindow(hwnd);
     return Err("obs_display_create devolvio null (¿ya se inicio libobs?)".into());
