@@ -108,6 +108,7 @@ pub struct EmberioConfig {
   pub clip_seconds: i64,
   pub clips_dir: Option<String>,
   pub hotkey: Option<HotkeyConfig>,
+  pub hotkey_toggle: Option<HotkeyConfig>,
   #[serde(default = "default_video_source_type")]
   pub video_source_type: String,
   pub video_source_id: Option<String>,
@@ -161,6 +162,7 @@ impl Default for EmberioConfig {
       clip_seconds: default_clip_seconds(),
       clips_dir: None,
       hotkey: None,
+      hotkey_toggle: None,
       video_source_type: default_video_source_type(),
       video_source_id: None,
       monitor_id: None,

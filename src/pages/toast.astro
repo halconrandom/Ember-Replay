@@ -29,8 +29,7 @@ import '../styles/global.css';
 			const desc = document.getElementById("toast-desc")!;
 			let hideTimeout: number;
 
-			listen<number>("show-toast", (event) => {
-				const seconds = event.payload;
+			function triggerToast(seconds: number) {
 				desc.textContent = `Clip de ${seconds} segundos guardado.`;
 
 				// Reiniciar animaciones y mostrar
@@ -55,6 +54,17 @@ import '../styles/global.css';
 						win.hide();
 					}, 300);
 				}, 4000);
+			}
+
+			// Verificar parametros de carga
+			const params = new URLSearchParams(window.location.search);
+			const timeParam = params.get("time");
+			if (timeParam !== null) {
+				triggerToast(Number(timeParam));
+			}
+
+			listen<number>("show-toast", (event) => {
+				triggerToast(event.payload);
 			});
 		</script>
 	</body>

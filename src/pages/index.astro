@@ -265,11 +265,17 @@ import '../styles/global.css';
 							</div>
 
 							<div>
-								<label class="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold mb-1.5 block">Atajo de Teclado (Hotkey)</label>
-								<button id="change-hotkey" class="w-full flex items-center justify-between bg-[#09090b] border border-zinc-700/80 rounded-md px-3 py-2.5 hover:border-orange-500/50 transition-colors cursor-pointer">
-									<span class="text-xs text-zinc-400">Guardar clip</span>
-									<kbd id="hotkey-kbd" class="bg-zinc-800 text-zinc-200 px-2 py-0.5 rounded text-[10px] border border-zinc-700 font-mono">F9</kbd>
-								</button>
+								<label class="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold mb-1.5 block">Atajos de Teclado (Hotkeys)</label>
+								<div class="flex flex-col gap-2">
+									<button id="change-hotkey" class="w-full flex items-center justify-between bg-[#09090b] border border-zinc-700/80 rounded-md px-3 py-2.5 hover:border-orange-500/50 transition-colors cursor-pointer">
+										<span class="text-xs text-zinc-400">Guardar clip</span>
+										<kbd id="hotkey-kbd" class="bg-zinc-800 text-zinc-200 px-2 py-0.5 rounded text-[10px] border border-zinc-700 font-mono">F9</kbd>
+									</button>
+									<button id="change-hotkey-toggle" class="w-full flex items-center justify-between bg-[#09090b] border border-zinc-700/80 rounded-md px-3 py-2.5 hover:border-orange-500/50 transition-colors cursor-pointer">
+										<span class="text-xs text-zinc-400">Iniciar/Detener grabación</span>
+										<kbd id="hotkey-toggle-kbd" class="bg-zinc-800 text-zinc-200 px-2 py-0.5 rounded text-[10px] border border-zinc-700 font-mono">F10</kbd>
+									</button>
+								</div>
 							</div>
 						</div>
 					</div>
@@ -678,6 +684,9 @@ import '../styles/global.css';
 			listen<string>("clip-save-error", (event) => {
 				setText("save-clip-status", `Error: ${event.payload}`);
 			});
+			listen<boolean>("recording-status-changed", (event) => {
+				setRecordingUi(event.payload);
+			});
 			listen<OverlayInfo[]>("overlays-updated", (event) => {
 				renderOverlays(event.payload);
 			});
@@ -685,8 +694,8 @@ import '../styles/global.css';
 			// ---------------------------------------------------------------
 			// Hotkey de guardado
 			// ---------------------------------------------------------------
-			function describeHotkey(h: HotkeyConfig | null): string {
-				if (!h) return "F9";
+			function describeHotkey(h: HotkeyConfig | null, defaultKey = "F9"): string {
+				if (!h) return defaultKey;
 				return `${h.ctrl ? "Ctrl+" : ""}${h.shift ? "Shift+" : ""}${h.alt ? "Alt+" : ""}vk${h.vk_code}`;
 			}
 
@@ -700,7 +709,27 @@ import '../styles/global.css';
 					window.removeEventListener("keydown", onKeyDown, true);
 					try {
 						await invoke<string>("set_save_hotkey", { vkCode: e.keyCode, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey });
-						const combo = describeHotkey({ vk_code: e.keyCode, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey });
+						const combo = describeHotkey({ vk_code: e.keyCode, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey }, "F9");
+						kbd.textContent = combo;
+					} catch (err) {
+						kbd.textContent = original;
+						setText("save-clip-status", `Error: ${err}`);
+					}
+				};
+				window.addEventListener("keydown", onKeyDown, true);
+			});
+
+			el("change-hotkey-toggle")?.addEventListener("click", () => {
+				const kbd = el("hotkey-toggle-kbd")!;
+				const original = kbd.textContent;
+				kbd.textContent = "...";
+
+				const onKeyDown = async (e: KeyboardEvent) => {
+					e.preventDefault();
+					window.removeEventListener("keydown", onKeyDown, true);
+					try {
+						await invoke<string>("set_toggle_hotkey", { vkCode: e.keyCode, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey });
+						const combo = describeHotkey({ vk_code: e.keyCode, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey }, "F10");
 						kbd.textContent = combo;
 					} catch (err) {
 						kbd.textContent = original;
@@ -1249,8 +1278,11 @@ import '../styles/global.css';
 
 				setText("clips-dir-display", config.clips_dir ?? "clips/ (por defecto)");
 
-				const hotkeyDesc = describeHotkey(config.hotkey);
+				const hotkeyDesc = describeHotkey(config.hotkey, "F9");
 				setText("hotkey-kbd", hotkeyDesc);
+
+				const toggleHotkeyDesc = describeHotkey(config.hotkey_toggle, "F10");
+				setText("hotkey-toggle-kbd", toggleHotkeyDesc);
 
 				renderAudioTracks(config.audio_sources);
 

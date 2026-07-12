@@ -78,6 +78,7 @@ static OBS_INIT_LOCK: Mutex<()> = Mutex::new(());
 
 
 const DEFAULT_HOTKEY_VK_F9: i32 = 0x78; // VK_F9
+const DEFAULT_TOGGLE_HOTKEY_VK_F10: i32 = 0x79; // VK_F10
 
 struct SendHWND(HWND);
 unsafe impl Send for SendHWND {}
@@ -87,14 +88,18 @@ static HOTKEY_TX: Mutex<Option<mpsc::Sender<HotkeyCmd>>> = Mutex::new(None);
 static HOTKEY_HWND: Mutex<Option<SendHWND>> = Mutex::new(None);
 
 enum HotkeyCmd {
-  Register { vk_code: i32, ctrl: bool, shift: bool, alt: bool },
+  Register { id: i32, vk_code: i32, ctrl: bool, shift: bool, alt: bool },
 }
 
 unsafe extern "system" fn hotkey_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
   match msg {
     WM_HOTKEY => {
-      // El hotkey fue presionado!
-      tauri::async_runtime::spawn(save_clip_and_notify());
+      let id = wparam as i32;
+      if id == 1 {
+        tauri::async_runtime::spawn(save_clip_and_notify());
+      } else if id == 2 {
+        tauri::async_runtime::spawn(toggle_recording_and_notify());
+      }
       0
     }
     WM_DESTROY => {
@@ -152,18 +157,18 @@ fn init_native_hotkey_thread() {
       if msg.message == WM_USER {
         while let Ok(cmd) = rx.try_recv() {
           match cmd {
-            HotkeyCmd::Register { vk_code, ctrl, shift, alt } => {
-              UnregisterHotKey(hwnd, 1);
-              let mut modifiers = 0x4000; // MOD_NOREPEAT
-              if ctrl { modifiers |= 0x0002; }
-              if shift { modifiers |= 0x0004; }
-              if alt { modifiers |= 0x0001; }
-              if RegisterHotKey(hwnd, 1, modifiers, vk_code as u32) == 0 {
-                log::error!("Fallo RegisterHotKey para vk={}, mod={}", vk_code, modifiers);
-              } else {
-                log::info!("RegisterHotKey exitoso para vk={}, mod={}", vk_code, modifiers);
-              }
-            }
+            HotkeyCmd::Register { id, vk_code, ctrl, shift, alt } => {
+               UnregisterHotKey(hwnd, id);
+               let mut modifiers = 0x4000; // MOD_NOREPEAT
+               if ctrl { modifiers |= 0x0002; }
+               if shift { modifiers |= 0x0004; }
+               if alt { modifiers |= 0x0001; }
+               if RegisterHotKey(hwnd, id, modifiers, vk_code as u32) == 0 {
+                 log::error!("Fallo RegisterHotKey para id={}, vk={}, mod={}", id, vk_code, modifiers);
+               } else {
+                 log::info!("RegisterHotKey exitoso para id={}, vk={}, mod={}", id, vk_code, modifiers);
+               }
+             }
           }
         }
       } else {
@@ -174,9 +179,9 @@ fn init_native_hotkey_thread() {
   });
 }
 
-fn register_native_hotkey(vk_code: i32, ctrl: bool, shift: bool, alt: bool) {
+fn register_native_hotkey(id: i32, vk_code: i32, ctrl: bool, shift: bool, alt: bool) {
   if let Some(tx) = &*HOTKEY_TX.lock().unwrap() {
-    tx.send(HotkeyCmd::Register { vk_code, ctrl, shift, alt }).ok();
+    tx.send(HotkeyCmd::Register { id, vk_code, ctrl, shift, alt }).ok();
     unsafe {
       if let Some(hwnd) = &*HOTKEY_HWND.lock().unwrap() {
         PostMessageW(hwnd.0, WM_USER, 0, 0);
@@ -219,31 +224,18 @@ fn play_notification_sound() {
   }
 }
 
-fn show_toast_notification(app: &AppHandle, clip_time: i64) {
-  play_notification_sound();
-
-  // Si la ventana ya existe, la mostramos y emitimos el evento
-  if let Some(win) = app.get_webview_window("clip_toast") {
-    let _ = win.emit("show-toast", clip_time);
-    let _ = win.show();
-    let _ = win.set_focus();
-    return;
-  }
-
-  // De lo contrario, la creamos dinamicamente posicionada en la esquina inferior derecha
+fn create_native_overlay_window(app: &AppHandle, window_id: &str, route: &str, width: f64, height: f64, offset_y: f64) {
   let (screen_w, screen_h) = primary_monitor_size();
-  let toast_w = 280.0;
-  let toast_h = 70.0;
-  let x = (screen_w as f64) - toast_w - 20.0;
-  let y = (screen_h as f64) - toast_h - 60.0; // Desplazamiento por barra de tareas
+  let x = (screen_w as f64) - width - 20.0;
+  let y = (screen_h as f64) - height - offset_y;
 
   let builder = tauri::WebviewWindowBuilder::new(
     app,
-    "clip_toast",
-    tauri::WebviewUrl::App("toast".into())
+    window_id,
+    tauri::WebviewUrl::App(route.into())
   )
-  .title("Ember Notification")
-  .inner_size(toast_w, toast_h)
+  .title("Ember Overlay")
+  .inner_size(width, height)
   .position(x, y)
   .resizable(false)
   .decorations(false)
@@ -263,8 +255,33 @@ fn show_toast_notification(app: &AppHandle, clip_time: i64) {
         SetWindowLongW(raw_hwnd, GWL_EXSTYLE, new_style);
       }
     }
-    let _ = win.emit("show-toast", clip_time);
   }
+}
+
+fn show_toast_notification(app: &AppHandle, clip_time: i64) {
+  play_notification_sound();
+
+  let route = format!("toast?time={clip_time}");
+  if let Some(win) = app.get_webview_window("clip_toast") {
+    let _ = win.emit("show-toast", clip_time);
+    let _ = win.show();
+    let _ = win.set_focus();
+    return;
+  }
+
+  create_native_overlay_window(app, "clip_toast", &route, 280.0, 70.0, 60.0);
+}
+
+fn show_status_notification(app: &AppHandle, active: bool) {
+  let route = format!("status_toast?active={active}");
+  if let Some(win) = app.get_webview_window("status_toast") {
+    let _ = win.emit("show-status", active);
+    let _ = win.show();
+    let _ = win.set_focus();
+    return;
+  }
+
+  create_native_overlay_window(app, "status_toast", &route, 200.0, 44.0, 140.0);
 }
 
 /// Resolucion del monitor principal, usada como canvas base de libobs.
@@ -1038,6 +1055,43 @@ async fn save_clip_and_notify() {
   }
 }
 
+async fn toggle_recording_and_notify() {
+  let is_recording = { OUTPUT_STATE.lock().unwrap().is_some() };
+  if is_recording {
+    let _ = stop_recording_impl();
+    if let Some(app) = APP_HANDLE.get() {
+      let _ = app.emit("recording-status-changed", false);
+      show_status_notification(app, false);
+    }
+  } else {
+    let clip_seconds = with_config(|c| c.clip_seconds);
+    unsafe {
+      if let Err(e) = ensure_obs_platform_initialized() {
+        log::error!("Error al inicializar libobs en toggle: {}", e);
+        return;
+      }
+      if !obs_ffi::obs_video_active() {
+        let _ = apply_video_settings();
+      }
+      if let Err(e) = ensure_capture_started() {
+        log::error!("Error al iniciar captura en toggle: {}", e);
+        return;
+      }
+      match ensure_output_started(clip_seconds) {
+        Ok(_) => {
+          if let Some(app) = APP_HANDLE.get() {
+            let _ = app.emit("recording-status-changed", true);
+            show_status_notification(app, true);
+          }
+        }
+        Err(e) => {
+          log::error!("Error al iniciar output en toggle: {}", e);
+        }
+      }
+    }
+  }
+}
+
 async fn save_clip_internal() -> Result<String, String> {
   let output_ptr: RawPtr<obs_ffi::obs_output_t> = {
     let guard = OUTPUT_STATE.lock().unwrap();
@@ -1176,7 +1230,7 @@ fn save_clip_now() {
 /// que en Windows coincide con los VK_* para teclas comunes).
 #[tauri::command]
 fn set_save_hotkey(vk_code: i32, ctrl: bool, shift: bool, alt: bool) -> Result<String, String> {
-  register_native_hotkey(vk_code, ctrl, shift, alt);
+  register_native_hotkey(1, vk_code, ctrl, shift, alt);
 
   with_config(|c| c.hotkey = Some(config::HotkeyConfig { vk_code, ctrl, shift, alt }));
   persist_config();
@@ -1189,6 +1243,23 @@ fn set_save_hotkey(vk_code: i32, ctrl: bool, shift: bool, alt: bool) -> Result<S
   );
 
   Ok(format!("Hotkey de guardado ahora es: {combo_desc}"))
+}
+
+#[tauri::command]
+fn set_toggle_hotkey(vk_code: i32, ctrl: bool, shift: bool, alt: bool) -> Result<String, String> {
+  register_native_hotkey(2, vk_code, ctrl, shift, alt);
+
+  with_config(|c| c.hotkey_toggle = Some(config::HotkeyConfig { vk_code, ctrl, shift, alt }));
+  persist_config();
+
+  let combo_desc = format!(
+    "{}{}{}vk={vk_code}",
+    if ctrl { "Ctrl+" } else { "" },
+    if shift { "Shift+" } else { "" },
+    if alt { "Alt+" } else { "" },
+  );
+
+  Ok(format!("Hotkey de encendido/apagado ahora es: {combo_desc}"))
 }
 
 /// Cambia donde se guardan los clips. Si ya estas grabando, el output ya
@@ -1908,12 +1979,19 @@ pub fn run() {
       // Inicializar el hilo de hotkey global nativo
       init_native_hotkey_thread();
 
-      // Cargar el hotkey guardado en la configuracion
+      // Cargar los hotkeys guardados o registrarlos por defecto
       let loaded_hotkey = latest_cfg.hotkey;
       if let Some(h) = loaded_hotkey {
-        register_native_hotkey(h.vk_code, h.ctrl, h.shift, h.alt);
+        register_native_hotkey(1, h.vk_code, h.ctrl, h.shift, h.alt);
       } else {
-        register_native_hotkey(DEFAULT_HOTKEY_VK_F9, false, false, false);
+        register_native_hotkey(1, DEFAULT_HOTKEY_VK_F9, false, false, false);
+      }
+
+      let loaded_toggle_hotkey = latest_cfg.hotkey_toggle;
+      if let Some(h) = loaded_toggle_hotkey {
+        register_native_hotkey(2, h.vk_code, h.ctrl, h.shift, h.alt);
+      } else {
+        register_native_hotkey(2, DEFAULT_TOGGLE_HOTKEY_VK_F10, false, false, false);
       }
 
       // Inicializar libobs y arrancar la captura en segundo plano
@@ -1989,6 +2067,7 @@ pub fn run() {
       stop_recording,
       save_clip_now,
       set_save_hotkey,
+      set_toggle_hotkey,
       set_clips_dir,
       get_config,
       list_monitors,
