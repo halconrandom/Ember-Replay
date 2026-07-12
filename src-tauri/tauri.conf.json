@@ -1,23 +1,23 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "emberio",
+  "productName": "ember",
   "version": "0.1.0",
   "identifier": "dev.halcondev.emberio",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:4321",
+    "devUrl": "http://localhost:4322",
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
   },
   "app": {
     "windows": [
       {
-        "title": "Emberio",
-        "width": 860,
-        "height": 580,
+        "title": "Ember",
+        "width": 1100,
+        "height": 700,
         "minWidth": 860,
         "minHeight": 580,
-        "resizable": false,
+        "resizable": true,
         "fullscreen": false,
         "decorations": false,
         "transparent": false
