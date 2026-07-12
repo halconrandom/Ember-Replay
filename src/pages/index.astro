@@ -109,6 +109,9 @@ import '../styles/global.css';
 									<button id="show-add-text-overlay" class="flex items-center gap-1 text-[10px] font-semibold text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 px-2 py-1 rounded border border-zinc-700 transition-colors cursor-pointer">
 										+ Texto
 									</button>
+									<button id="show-add-browser-overlay" class="flex items-center gap-1 text-[10px] font-semibold text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 px-2 py-1 rounded border border-zinc-700 transition-colors cursor-pointer">
+										+ Web
+									</button>
 								</div>
 							</div>
 							
@@ -116,6 +119,12 @@ import '../styles/global.css';
 								<input type="text" id="new-overlay-text" placeholder="Texto del overlay" class="flex-1 min-w-0 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs rounded px-2 py-1 focus:outline-none" />
 								<button id="confirm-add-text-overlay" class="shrink-0 text-[10px] font-semibold bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 text-orange-400 px-3 py-1 rounded transition-colors cursor-pointer">Agregar</button>
 							</div>
+
+							<div id="add-browser-overlay-form" class="hidden items-center gap-2 bg-[#09090b] border border-zinc-800 rounded-lg p-2 mb-2 shrink-0">
+								<input type="text" id="new-overlay-url" placeholder="https://example.com" class="flex-1 min-w-0 bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs rounded px-2 py-1 focus:outline-none" />
+								<button id="confirm-add-browser-overlay" class="shrink-0 text-[10px] font-semibold bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 text-orange-400 px-3 py-1 rounded transition-colors cursor-pointer">Agregar</button>
+							</div>
+
 							<p id="overlays-status" class="text-[9px] text-zinc-500 mb-1 shrink-0"></p>
 
 							<div id="overlays-list" class="flex-1 overflow-y-auto space-y-1.5 pr-1"></div>
@@ -1017,6 +1026,13 @@ import '../styles/global.css';
 				if (o.kind === "image") {
 					const name = o.content.split(/[\\/]/).pop() ?? o.content;
 					return name;
+				} else if (o.kind === "browser") {
+					try {
+						const url = new URL(o.content);
+						return url.hostname + url.pathname;
+					} catch (_) {
+						return o.content;
+					}
 				}
 				return o.content || "(vacio)";
 			}
@@ -1032,7 +1048,16 @@ import '../styles/global.css';
 					itemEl.dataset.index = String(overlay.index);
 
 					const badge = node.querySelector(".overlay-kind-badge") as HTMLElement;
-					badge.textContent = overlay.kind === "image" ? "IMG" : "TXT";
+					if (overlay.kind === "image") {
+						badge.textContent = "IMG";
+						badge.className = "overlay-kind-badge shrink-0 text-[8px] font-bold uppercase px-1 py-0.5 rounded bg-zinc-800 text-zinc-400";
+					} else if (overlay.kind === "browser") {
+						badge.textContent = "WEB";
+						badge.className = "overlay-kind-badge shrink-0 text-[8px] font-bold uppercase px-1 py-0.5 rounded bg-blue-950 text-blue-400 border border-blue-900/40";
+					} else {
+						badge.textContent = "TXT";
+						badge.className = "overlay-kind-badge shrink-0 text-[8px] font-bold uppercase px-1 py-0.5 rounded bg-zinc-800 text-zinc-400";
+					}
 
 					const contentEl = node.querySelector(".overlay-content") as HTMLElement;
 					contentEl.textContent = overlayLabel(overlay);
@@ -1168,6 +1193,29 @@ import '../styles/global.css';
 				if (!text) return;
 				try {
 					const updated = await invoke<OverlayInfo[]>("add_text_overlay", { text });
+					renderOverlays(updated);
+					input.value = "";
+					setText("overlays-status", "");
+					await refreshPreviewRectIfEnabled();
+				} catch (err) {
+					setText("overlays-status", `Error: ${err}`);
+				}
+			});
+
+			el("show-add-browser-overlay")?.addEventListener("click", () => {
+				const form = el("add-browser-overlay-form")!;
+				const hidden = form.classList.contains("hidden");
+				form.classList.toggle("hidden");
+				form.classList.toggle("flex", hidden);
+				if (hidden) el<HTMLInputElement>("new-overlay-url")?.focus();
+			});
+
+			el("confirm-add-browser-overlay")?.addEventListener("click", async () => {
+				const input = el<HTMLInputElement>("new-overlay-url")!;
+				const url = input.value.trim();
+				if (!url) return;
+				try {
+					const updated = await invoke<OverlayInfo[]>("add_browser_overlay", { url });
 					renderOverlays(updated);
 					input.value = "";
 					setText("overlays-status", "");

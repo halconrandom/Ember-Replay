@@ -46,6 +46,8 @@ pub enum OverlayKind {
   Image,
   /// text_ft2_source -- overlay de texto simple. `content` = el texto.
   Text,
+  /// browser_source -- pagina web o widget HTML. `content` = URL.
+  Browser,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -66,6 +68,13 @@ pub struct OverlayConfig {
   pub visible: bool,
   #[serde(default = "default_overlay_locked")]
   pub locked: bool,
+  /// Opacidad 0.0..=1.0, aplicada via filtro de correccion de color.
+  #[serde(default = "default_overlay_opacity")]
+  pub opacity: f32,
+}
+
+fn default_overlay_opacity() -> f32 {
+  1.0
 }
 
 impl OverlayConfig {
