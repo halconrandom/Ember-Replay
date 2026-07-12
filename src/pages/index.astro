@@ -876,9 +876,21 @@ import '../styles/global.css';
 					volumeInput.value = String(pct);
 					volumeDbInput.value = linearToDb(linear);
 
+					let volumePending = false;
 					volumeInput.addEventListener("input", () => {
 						const currentLinear = Number(volumeInput.value) / 100;
 						volumeDbInput.value = linearToDb(currentLinear);
+
+						if (volumePending) return;
+						volumePending = true;
+						requestAnimationFrame(async () => {
+							volumePending = false;
+							try {
+								await invoke("set_audio_source_volume", { index, volume: currentLinear });
+							} catch (err) {
+								console.error("Error actualizando volumen en vivo:", err);
+							}
+						});
 					});
 					
 					volumeInput.addEventListener("change", async () => {
