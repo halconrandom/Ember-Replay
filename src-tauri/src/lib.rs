@@ -189,6 +189,81 @@ extern "system" {
 const SM_CXSCREEN: i32 = 0;
 const SM_CYSCREEN: i32 = 1;
 
+#[link(name = "winmm")]
+extern "system" {
+  pub fn PlaySoundW(
+    psz_sound: *const u16,
+    hmod: HWND,
+    fdw_sound: u32,
+  ) -> i32;
+}
+
+fn play_notification_sound() {
+  let base = app_dir();
+  let paths_to_try = vec![
+    base.join("notify.wav"),
+    base.join("../../../notify.wav"),
+  ];
+
+  for path in paths_to_try {
+    if path.exists() {
+      let path_wide: Vec<u16> = path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
+      unsafe {
+        PlaySoundW(path_wide.as_ptr(), std::ptr::null_mut(), 0x00020003); // SND_FILENAME | SND_ASYNC | SND_NODEFAULT
+      }
+      break;
+    }
+  }
+}
+
+fn show_toast_notification(app: &AppHandle, clip_time: i64) {
+  play_notification_sound();
+
+  // Si la ventana ya existe, la mostramos y emitimos el evento
+  if let Some(win) = app.get_webview_window("clip_toast") {
+    let _ = win.emit("show-toast", clip_time);
+    let _ = win.show();
+    let _ = win.set_focus();
+    return;
+  }
+
+  // De lo contrario, la creamos dinamicamente posicionada en la esquina inferior derecha
+  let (screen_w, screen_h) = primary_monitor_size();
+  let toast_w = 280.0;
+  let toast_h = 70.0;
+  let x = (screen_w as f64) - toast_w - 20.0;
+  let y = (screen_h as f64) - toast_h - 60.0; // Desplazamiento por barra de tareas
+
+  let builder = tauri::WebviewWindowBuilder::new(
+    app,
+    "clip_toast",
+    tauri::WebviewUrl::App("toast".into())
+  )
+  .title("Ember Notification")
+  .inner_size(toast_w, toast_h)
+  .position(x, y)
+  .resizable(false)
+  .decorations(false)
+  .transparent(true)
+  .always_on_top(true)
+  .shadow(false);
+
+  if let Ok(win) = builder.build() {
+    unsafe {
+      if let Ok(hwnd) = win.hwnd() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+          GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_TRANSPARENT, WS_EX_LAYERED
+        };
+        let raw_hwnd = hwnd.0 as windows_sys::Win32::Foundation::HWND;
+        let ex_style = GetWindowLongW(raw_hwnd, GWL_EXSTYLE);
+        let new_style = (ex_style as u32 | WS_EX_TRANSPARENT | WS_EX_LAYERED) as i32;
+        SetWindowLongW(raw_hwnd, GWL_EXSTYLE, new_style);
+      }
+    }
+    let _ = win.emit("show-toast", clip_time);
+  }
+}
+
 /// Resolucion del monitor principal, usada como canvas base de libobs.
 /// No depende de que los modulos ya esten cargados (a diferencia de
 /// list_monitors), asi que la podemos usar antes de obs_load_all_modules.
@@ -941,14 +1016,14 @@ unsafe fn ensure_output_started(clip_seconds: i64) -> Result<PathBuf, String> {
 
 
 
-/// Guarda el clip y avisa al frontend via evento (asi el boton y el hotkey
-/// global comparten el mismo camino y la UI se entera de los dos).
 async fn save_clip_and_notify() {
   let result = save_clip_internal().await;
   if let Some(app) = APP_HANDLE.get() {
     match result {
       Ok(path) => {
         let _ = app.emit("clip-saved", path);
+        let clip_seconds = with_config(|c| c.clip_seconds);
+        show_toast_notification(app, clip_seconds);
       }
       Err(err) => {
         let _ = app.emit("clip-save-error", err);
