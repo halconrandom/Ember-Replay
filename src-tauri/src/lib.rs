@@ -273,17 +273,39 @@ fn show_toast_notification(app: &AppHandle, clip_time: i64) {
 
 fn show_status_notification(app: &AppHandle, active: bool) {
   let route = format!("status_toast?active={active}");
-  if let Some(_) = app.get_webview_window("status_toast") {
-    let _ = app.emit("show-status", active);
-    return;
+
+  // Buscar en la config que monitor se quiere capturar
+  let source_type = with_config(|c| c.video_source_type.clone());
+  let source_id = with_config(|c| c.video_source_id.clone());
+
+  let mut target_monitor = None;
+
+  if source_type == "screen" {
+    if let Some(id) = source_id {
+      if let Ok(monitors) = app.available_monitors() {
+        if let Ok(idx) = id.parse::<usize>() {
+          target_monitor = monitors.get(idx).cloned();
+        } else {
+          target_monitor = monitors.into_iter().find(|m| m.name() == Some(&id));
+        }
+      }
+    }
   }
 
-  let main_win = app.get_webview_window("main");
-  let monitor = main_win
-    .as_ref()
-    .and_then(|w| w.current_monitor().ok().flatten());
+  // Fallback 1: Monitor donde esta la ventana principal
+  if target_monitor.is_none() {
+    let main_win = app.get_webview_window("main");
+    target_monitor = main_win
+      .as_ref()
+      .and_then(|w| w.current_monitor().ok().flatten());
+  }
 
-  let (x, y) = match monitor {
+  // Fallback 2: Monitor primario de la aplicacion
+  if target_monitor.is_none() {
+    target_monitor = app.primary_monitor().ok().flatten();
+  }
+
+  let (x, y) = match target_monitor {
     Some(m) => {
       let pos = m.position();
       let size = m.size();
@@ -309,6 +331,14 @@ fn show_status_notification(app: &AppHandle, active: bool) {
     }
   };
 
+  let target_pos = tauri::Position::Logical(tauri::LogicalPosition::new(x, y));
+
+  if let Some(win) = app.get_webview_window("status_toast") {
+    let _ = app.emit("show-status", active);
+    let _ = win.set_position(target_pos);
+    return;
+  }
+
   let builder = tauri::WebviewWindowBuilder::new(
     app,
     "status_toast",
@@ -324,17 +354,22 @@ fn show_status_notification(app: &AppHandle, active: bool) {
   .skip_taskbar(true)
   .shadow(false);
 
-  if let Ok(win) = builder.build() {
-    unsafe {
-      if let Ok(hwnd) = win.hwnd() {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-          GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_TRANSPARENT, WS_EX_LAYERED
-        };
-        let raw_hwnd = hwnd.0 as windows_sys::Win32::Foundation::HWND;
-        let ex_style = GetWindowLongW(raw_hwnd, GWL_EXSTYLE);
-        let new_style = (ex_style as u32 | WS_EX_TRANSPARENT | WS_EX_LAYERED) as i32;
-        SetWindowLongW(raw_hwnd, GWL_EXSTYLE, new_style);
+  match builder.build() {
+    Ok(win) => {
+      unsafe {
+        if let Ok(hwnd) = win.hwnd() {
+          use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_TRANSPARENT, WS_EX_LAYERED
+          };
+          let raw_hwnd = hwnd.0 as windows_sys::Win32::Foundation::HWND;
+          let ex_style = GetWindowLongW(raw_hwnd, GWL_EXSTYLE);
+          let new_style = (ex_style as u32 | WS_EX_TRANSPARENT | WS_EX_LAYERED) as i32;
+          SetWindowLongW(raw_hwnd, GWL_EXSTYLE, new_style);
+        }
       }
+    }
+    Err(e) => {
+      log::error!("No se pudo crear la ventana status_toast: {e}");
     }
   }
 }
@@ -1274,6 +1309,17 @@ fn stop_recording_impl() -> Result<String, String> {
     let state_opt = { OUTPUT_STATE.lock().unwrap().take() };
     if let Some(state) = state_opt {
       obs_ffi::obs_output_stop(state.output.0);
+
+      // obs_output_stop es asincrono en libobs -- esperar a que el output
+      // realmente se detenga antes de liberar recursos para evitar
+      // use-after-free / crashes.
+      for _ in 0..100 {
+        if !obs_ffi::obs_output_active(state.output.0) {
+          break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+      }
+
       obs_ffi::obs_output_release(state.output.0);
       obs_ffi::obs_encoder_release(state.video_encoder.0);
       obs_ffi::obs_encoder_release(state.audio_encoder.0);
