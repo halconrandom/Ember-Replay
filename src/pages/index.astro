@@ -605,6 +605,9 @@ import '../styles/global.css';
 			listen<string>("clip-save-error", (event) => {
 				setText("save-clip-status", `Error: ${event.payload}`);
 			});
+			listen<OverlayInfo[]>("overlays-updated", (event) => {
+				renderOverlays(event.payload);
+			});
 
 			// ---------------------------------------------------------------
 			// Hotkey de guardado

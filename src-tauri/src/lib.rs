@@ -560,6 +560,59 @@ unsafe fn sync_scene_z_order(state: &mut CaptureState) {
   obs_ffi::obs_scene_reorder_items(state.scene.0, items_raw.as_ptr() as *const _, items_raw.len());
 }
 
+pub(crate) unsafe fn try_select_overlay(canvas_x: f32, canvas_y: f32) -> Option<usize> {
+  let guard = CAPTURE_STATE.lock().unwrap();
+  let state = guard.as_ref()?;
+  
+  let config_guard = CONFIG.lock().unwrap();
+  let config = config_guard.as_ref()?;
+
+  for (index, overlay) in state.overlays.iter().enumerate() {
+    let cfg = config.overlays.get(index)?;
+    if cfg.locked || !cfg.visible {
+      continue;
+    }
+
+    let w = obs_ffi::obs_source_get_width(overlay.source.0) as f32;
+    let h = obs_ffi::obs_source_get_height(overlay.source.0) as f32;
+
+    let left = cfg.x;
+    let top = cfg.y;
+    let right = cfg.x + w * cfg.scale;
+    let bottom = cfg.y + h * cfg.scale;
+
+    if canvas_x >= left && canvas_x <= right && canvas_y >= top && canvas_y <= bottom {
+      return Some(index);
+    }
+  }
+
+  None
+}
+
+pub(crate) unsafe fn drag_selected_overlay(index: usize, dx: f32, dy: f32) {
+  let mut guard = CAPTURE_STATE.lock().unwrap();
+  if let Some(state) = guard.as_mut() {
+    if let Some(overlay) = state.overlays.get(index) {
+      let mut config_guard = CONFIG.lock().unwrap();
+      if let Some(config) = config_guard.as_mut() {
+        if let Some(cfg) = config.overlays.get_mut(index) {
+          cfg.x += dx;
+          cfg.y += dy;
+          obs_ffi::obs_sceneitem_set_pos(overlay.item.0, &vec2_of(cfg.x, cfg.y) as *const _);
+        }
+      }
+    }
+  }
+}
+
+pub(crate) fn finish_drag_overlay() {
+  persist_config();
+  if let Some(app) = APP_HANDLE.get() {
+    let list = overlay_info_list();
+    let _ = app.emit("overlays-updated", list);
+  }
+}
+
 unsafe fn ensure_output_started(clip_seconds: i64) -> Result<PathBuf, String> {
   {
     let guard = OUTPUT_STATE.lock().unwrap();

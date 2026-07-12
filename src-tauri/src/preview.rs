@@ -31,9 +31,55 @@ pub static PREVIEW_PARAMS: Mutex<PreviewParams> = Mutex::new(PreviewParams {
 });
 
 static LAST_MOUSE: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+static SELECTED_OVERLAY: Mutex<Option<usize>> = Mutex::new(None);
 
 /// Resolucion base actual del canvas de OBS.
 static CANVAS_SIZE: Mutex<(u32, u32)> = Mutex::new((1920, 1080));
+
+pub fn client_to_canvas(click_x: i32, click_y: i32, cx: i32, cy: i32) -> Option<(f32, f32)> {
+  let (base_w, base_h) = *CANVAS_SIZE.lock().unwrap();
+  if base_w == 0 || base_h == 0 || cx == 0 || cy == 0 {
+    return None;
+  }
+
+  let scale = (cx as f32 / base_w as f32).min(cy as f32 / base_h as f32);
+  let scaled_w = (base_w as f32 * scale).round() as i32;
+  let scaled_h = (base_h as f32 * scale).round() as i32;
+  let off_x = (cx - scaled_w) / 2;
+  let off_y = (cy - scaled_h) / 2;
+
+  let px = click_x - off_x;
+  let py = (cy - click_y) - off_y; // Invertir Y para OBS space
+
+  if px >= 0 && px < scaled_w && py >= 0 && py < scaled_h {
+    let (zoom, pan_x, pan_y) = {
+      let params = PREVIEW_PARAMS.lock().unwrap();
+      (params.zoom, params.pan_x, params.pan_y)
+    };
+
+    let half_w = (base_w as f32 / 2.0) / zoom;
+    let half_h = (base_h as f32 / 2.0) / zoom;
+    let left = base_w as f32 / 2.0 - half_w - pan_x;
+    let right = base_w as f32 / 2.0 + half_w - pan_x;
+    let bottom = base_h as f32 / 2.0 - half_h - pan_y;
+    let top = base_h as f32 / 2.0 + half_h - pan_y;
+
+    let frac_x = px as f32 / scaled_w as f32;
+    let frac_y = py as f32 / scaled_h as f32;
+
+    let canvas_x = left + frac_x * (right - left);
+    let canvas_y = bottom + frac_y * (top - bottom);
+
+    // En OBS, las coordenadas de los scene items tienen origen arriba-izquierda (top-left).
+    // canvas_y en la proyección va de abajo hacia arriba (bottom-up).
+    // Para convertir canvas_y a coordenadas de scene item (top-down):
+    let scene_y = base_h as f32 - canvas_y;
+
+    Some((canvas_x, scene_y))
+  } else {
+    None
+  }
+}
 
 pub fn set_canvas_size(w: u32, h: u32) {
   *CANVAS_SIZE.lock().unwrap() = (w, h);
@@ -74,14 +120,40 @@ pub fn reset_zoom() {
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
   match msg {
-    windows_sys::Win32::UI::WindowsAndMessaging::WM_LBUTTONDOWN |
+    windows_sys::Win32::UI::WindowsAndMessaging::WM_LBUTTONDOWN => {
+      let x = (lparam & 0xffff) as i16 as i32;
+      let y = ((lparam >> 16) & 0xffff) as i16 as i32;
+      *LAST_MOUSE.lock().unwrap() = Some((x, y));
+
+      let mut rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
+      windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect);
+      let cx = rect.right - rect.left;
+      let cy = rect.bottom - rect.top;
+
+      if let Some((canvas_x, canvas_y)) = client_to_canvas(x, y, cx, cy) {
+        let selected = crate::try_select_overlay(canvas_x, canvas_y);
+        *SELECTED_OVERLAY.lock().unwrap() = selected;
+      } else {
+        *SELECTED_OVERLAY.lock().unwrap() = None;
+      }
+      0
+    }
     windows_sys::Win32::UI::WindowsAndMessaging::WM_MBUTTONDOWN => {
       let x = (lparam & 0xffff) as i16 as i32;
       let y = ((lparam >> 16) & 0xffff) as i16 as i32;
       *LAST_MOUSE.lock().unwrap() = Some((x, y));
+      *SELECTED_OVERLAY.lock().unwrap() = None;
       0
     }
-    windows_sys::Win32::UI::WindowsAndMessaging::WM_LBUTTONUP |
+    windows_sys::Win32::UI::WindowsAndMessaging::WM_LBUTTONUP => {
+      *LAST_MOUSE.lock().unwrap() = None;
+      let mut selected_guard = SELECTED_OVERLAY.lock().unwrap();
+      if selected_guard.is_some() {
+        *selected_guard = None;
+        crate::finish_drag_overlay();
+      }
+      0
+    }
     windows_sys::Win32::UI::WindowsAndMessaging::WM_MBUTTONUP => {
       *LAST_MOUSE.lock().unwrap() = None;
       0
@@ -90,25 +162,43 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
       let wparam_u = wparam as usize;
       let left_down = (wparam_u & 0x0001) != 0;
       let middle_down = (wparam_u & 0x0010) != 0;
-      let is_button_down = left_down || middle_down;
       
       let x = (lparam & 0xffff) as i16 as i32;
       let y = ((lparam >> 16) & 0xffff) as i16 as i32;
       
-      if is_button_down {
+      if left_down || middle_down {
         let mut last_mouse = LAST_MOUSE.lock().unwrap();
         if let Some((last_x, last_y)) = *last_mouse {
           let dx = x - last_x;
           let dy = y - last_y;
           if dx != 0 || dy != 0 {
-            let mut params = PREVIEW_PARAMS.lock().unwrap();
-            let scale_factor = params.zoom;
-            params.pan_x += (dx as f32) / scale_factor;
-            params.pan_y -= (dy as f32) / scale_factor; // Eje Y invertido (OBS es bottom-up)
-            drop(params);
-            
+            let selected_guard = SELECTED_OVERLAY.lock().unwrap();
+            if let Some(index) = *selected_guard {
+              if left_down {
+                let (base_w, base_h) = *CANVAS_SIZE.lock().unwrap();
+                let mut rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
+                windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect);
+                let cx = rect.right - rect.left;
+                let cy = rect.bottom - rect.top;
+                
+                let scale = (cx as f32 / base_w as f32).min(cy as f32 / base_h as f32);
+                let zoom = PREVIEW_PARAMS.lock().unwrap().zoom;
+                let overall_scale = scale * zoom;
+                if overall_scale > 0.0 {
+                  let dx_canvas = dx as f32 / overall_scale;
+                  let dy_canvas = dy as f32 / overall_scale;
+                  crate::drag_selected_overlay(index, dx_canvas, dy_canvas);
+                }
+              }
+            } else {
+              let mut params = PREVIEW_PARAMS.lock().unwrap();
+              let scale_factor = params.zoom;
+              params.pan_x += (dx as f32) / scale_factor;
+              params.pan_y -= (dy as f32) / scale_factor;
+              drop(params);
+              emit_preview_params_change();
+            }
             *last_mouse = Some((x, y));
-            emit_preview_params_change();
           }
         } else {
           *last_mouse = Some((x, y));
