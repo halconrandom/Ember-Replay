@@ -724,9 +724,8 @@ pub unsafe fn create(parent_hwnd: HWND, x: i32, y: i32, w: i32, h: i32) -> Resul
     adapter: 0,
   };
   // Color de fondo del display: libobs lo interpreta como 0xAABBGGRR (RGBA
-  // little-endian, R en el byte bajo). 0xFFFF0000 era AZUL opaco -- la
-  // famosa "pantalla azul" cuando la captura no entrega frames. Negro opaco:
-  let display = obs_ffi::obs_display_create(&mut init_data as *const _, 0xFF000000);
+  // little-endian, R en el byte bajo). Para que se mezcle con el panel #121215:
+  let display = obs_ffi::obs_display_create(&mut init_data as *const _, 0xFF151212);
   if display.is_null() {
     DestroyWindow(hwnd);
     return Err("obs_display_create devolvio null (¿ya se inicio libobs?)".into());
