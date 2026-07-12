@@ -1154,6 +1154,10 @@ async fn start_recording(clip_seconds: i64) -> Result<String, String> {
     with_config(|c| c.clip_seconds = clip_seconds);
     persist_config();
 
+    if let Some(app) = APP_HANDLE.get() {
+      show_status_notification(app, true);
+    }
+
     Ok(format!(
       "Grabando (buffer de {clip_seconds}s). Los clips se guardan en: {}",
       clips_dir.to_string_lossy()
@@ -1199,7 +1203,14 @@ unsafe fn release_capture_state(state: CaptureState) {
 
 #[tauri::command]
 async fn stop_recording() -> Result<String, String> {
-  stop_recording_impl()
+  let res = stop_recording_impl();
+  if res.is_ok() {
+    if let Some(app) = APP_HANDLE.get() {
+      let _ = app.emit("recording-status-changed", false);
+      show_status_notification(app, false);
+    }
+  }
+  res
 }
 
 fn stop_recording_impl() -> Result<String, String> {
