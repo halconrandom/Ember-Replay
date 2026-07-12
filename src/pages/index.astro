@@ -57,19 +57,20 @@ import '../styles/global.css';
 				<div id="content-studio" class="absolute inset-0 flex gap-3 p-3 overflow-hidden">
 					<!-- Columna Izquierda: Preview y Fuentes -->
 					<div class="flex-1 flex flex-col gap-2 overflow-hidden">
-						<!-- Panel Preview -->
-						<div class="bg-[#121215] border border-zinc-800/80 rounded-xl p-2.5 flex flex-col items-center justify-center shrink-0">
-							<div id="preview-surface" class="w-[440px] h-[248px] bg-black rounded-lg border border-zinc-900 flex items-center justify-center overflow-hidden shrink-0 relative">
-								<span id="preview-placeholder" class="text-[11px] text-zinc-600 px-6 text-center select-none">Preview apagado -- actívalo para ver la transmisión</span>
-								
-								<!-- Resize Handle -->
-								<div id="preview-resizer" class="absolute bottom-1 right-1 w-3.5 h-3.5 cursor-se-resize flex items-center justify-center text-zinc-600 hover:text-zinc-300 select-none z-10">
-									<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M22 22H2v-4h16V2h4v20z"/></svg>
+						<!-- Panel Preview: ocupa todo el espacio disponible (como OBS) --
+						     el video se letterboxea solo dentro del rectangulo negro. -->
+						<div class="bg-[#121215] border border-zinc-800/80 rounded-xl p-2.5 flex flex-col flex-1 min-h-0">
+							<!-- El wrapper llena el espacio; el surface se dimensiona por JS
+							     a la proporcion EXACTA del canvas de OBS, asi el rectangulo
+							     negro ES el canvas (sin franjas ambiguas alrededor). -->
+							<div id="preview-wrap" class="w-full flex-1 min-h-[160px] flex items-center justify-center overflow-hidden">
+								<div id="preview-surface" class="bg-black rounded-lg border border-zinc-900 flex items-center justify-center overflow-hidden relative" style="width:100%;height:100%">
+									<span id="preview-placeholder" class="text-[11px] text-zinc-600 px-6 text-center select-none">Preview apagado -- actívalo para ver la transmisión</span>
 								</div>
 							</div>
-							
+
 							<!-- Toolbar de control del Preview -->
-							<div id="preview-toolbar" class="w-[440px] flex items-center justify-between mt-2 px-1 select-none shrink-0">
+							<div id="preview-toolbar" class="w-full flex items-center justify-between mt-2 px-1 select-none shrink-0">
 								<div class="flex items-center gap-2">
 									<button id="toggle-preview" class="text-xs font-medium text-orange-400 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 rounded px-3 py-0.5 transition-all cursor-pointer">
 										Activar preview
@@ -93,8 +94,9 @@ import '../styles/global.css';
 							</div>
 						</div>
 
-						<!-- Panel Fuentes / Capas -->
-						<div class="flex-1 bg-[#121215] border border-zinc-800/80 rounded-xl p-3 flex flex-col overflow-hidden">
+						<!-- Panel Fuentes / Capas (altura fija con scroll; el preview se
+						     queda con el resto del espacio) -->
+						<div class="h-[220px] shrink-0 bg-[#121215] border border-zinc-800/80 rounded-xl p-3 flex flex-col overflow-hidden">
 							<div class="flex items-center justify-between border-b border-zinc-800/50 pb-2 mb-2 shrink-0">
 								<div class="flex items-center gap-2">
 									<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-orange-500"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
@@ -179,7 +181,9 @@ import '../styles/global.css';
 							</div>
 							<p id="audio-sources-status" class="text-[9px] text-zinc-500 mb-1 shrink-0"></p>
 
-							<div id="audio-tracks" class="flex-1 flex gap-2 overflow-x-auto items-stretch py-0.5 pr-1"></div>
+							<!-- Altura fija: los faders no deben estirarse con la ventana
+							     (en pantallas grandes quedaban gigantes e ilegibles). -->
+							<div id="audio-tracks" class="h-[240px] max-h-full shrink-0 flex gap-2 overflow-x-auto items-stretch py-0.5 pr-1"></div>
 						</div>
 					</div>
 				</div>
@@ -289,14 +293,14 @@ import '../styles/global.css';
 				</div>
 
 				<!-- Vertical Sliders & Level Meter -->
-				<div class="flex-1 flex items-center justify-center gap-1.5 mb-1 w-full px-2">
+				<div class="flex-1 flex items-center justify-center gap-2 mb-1 w-full px-1.5 overflow-hidden">
 					<!-- VU Level Meter (Vertical) -->
-					<div class="w-1 h-full bg-zinc-900 rounded-sm overflow-hidden flex flex-col justify-end border border-zinc-850">
+					<div class="w-1.5 h-full bg-zinc-950 rounded-sm overflow-hidden flex flex-col justify-end border border-zinc-800/80 shrink-0">
 						<div class="track-level w-full bg-orange-500 transition-[height] duration-75" style="height:0%"></div>
 					</div>
 					<!-- Volume Slider (Vertical) -->
-					<div class="h-full flex items-center flex-1 justify-center">
-						<input type="range" min="0" max="200" value="100" class="track-volume h-full w-1 bg-zinc-900 rounded-lg appearance-none cursor-pointer accent-orange-500 [writing-mode:vertical-lr] [direction:rtl] border border-zinc-850" />
+					<div class="h-full w-5 flex items-center justify-center shrink-0">
+						<input type="range" min="0" max="200" value="100" class="track-volume h-full w-full cursor-pointer accent-orange-500" style="-webkit-appearance: slider-vertical;" />
 					</div>
 				</div>
 
@@ -320,7 +324,8 @@ import '../styles/global.css';
 				<input type="number" class="overlay-y w-11 bg-zinc-900 border border-zinc-700/60 text-zinc-300 text-[10px] rounded px-1 py-0.5 text-center focus:outline-none shrink-0" title="Posicion Y" />
 				<input type="number" step="0.01" min="0.01" max="10" class="overlay-scale-x w-11 bg-zinc-900 border border-zinc-700/60 text-zinc-300 text-[10px] rounded px-1 py-0.5 text-center focus:outline-none shrink-0" title="Escala X" />
 				<input type="number" step="0.01" min="0.01" max="10" class="overlay-scale-y w-11 bg-zinc-900 border border-zinc-700/60 text-zinc-300 text-[10px] rounded px-1 py-0.5 text-center focus:outline-none shrink-0" title="Escala Y" />
-				
+				<input type="range" min="0" max="100" value="100" class="overlay-opacity w-14 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500 shrink-0" title="Opacidad" />
+
 				<button class="overlay-toggle-lock text-zinc-500 hover:text-zinc-200 transition-colors shrink-0 cursor-pointer" aria-label="Bloquear/desbloquear">
 					<!-- Candado se inyecta dinamicamente -->
 				</button>
@@ -366,6 +371,7 @@ import '../styles/global.css';
 				scale_y: number;
 				visible: boolean;
 				locked: boolean;
+				opacity: number;
 			}
 			interface EmberioConfig {
 				clip_seconds: number;
@@ -433,63 +439,53 @@ import '../styles/global.css';
 			});
 
 			// ---------------------------------------------------------------
-			// Redimensionar Preview (Resize handle)
+			// Preview auto-ajustable (como OBS): el surface llena el espacio
+			// disponible via flexbox, y cada vez que su tamano real cambia
+			// (resize de ventana, cambio de layout) reposicionamos la ventana
+			// nativa de libobs para que coincida. El video se letterboxea solo.
 			// ---------------------------------------------------------------
 			const previewSurface = el("preview-surface")!;
-			const resizeHandle = el("preview-resizer")!;
-			let isResizing = false;
-			let startX = 0;
-			let startWidth = 0;
+			const previewWrap = el("preview-wrap")!;
 
-			resizeHandle.addEventListener("mousedown", (e) => {
-				e.stopPropagation();
-				e.preventDefault();
-				isResizing = true;
-				startX = e.clientX;
-				startWidth = previewSurface.offsetWidth;
-			});
+			// Proporcion del canvas de OBS (se actualiza desde el backend al
+			// activar el preview; 16:9 como arranque razonable).
+			let canvasAspect = 16 / 9;
+			async function refreshCanvasAspect() {
+				try {
+					const [cw, ch] = await invoke<[number, number]>("get_canvas_size");
+					if (cw > 0 && ch > 0) canvasAspect = cw / ch;
+				} catch { /* mantener el valor actual */ }
+			}
 
-			window.addEventListener("mouseup", () => {
-				if (isResizing) {
-					isResizing = false;
+			// Dimensiona el rectangulo negro al mayor tamano con la proporcion
+			// exacta del canvas que quepa en el wrapper: el negro ES el canvas.
+			function sizePreviewSurface() {
+				const ww = previewWrap.clientWidth;
+				const wh = previewWrap.clientHeight;
+				if (ww <= 0 || wh <= 0) return;
+				let w = ww;
+				let h = w / canvasAspect;
+				if (h > wh) {
+					h = wh;
+					w = h * canvasAspect;
 				}
-			});
+				previewSurface.style.width = `${Math.floor(w)}px`;
+				previewSurface.style.height = `${Math.floor(h)}px`;
+			}
 
-			window.addEventListener("mousemove", (e) => {
-				if (isResizing) {
-					const dx = e.clientX - startX;
-					let newWidth = startWidth + dx;
-					
-					// Calcular límites dinámicos basándose en el tamaño de la ventana y el alto disponible
-					const leftCol = previewSurface.closest(".flex-col") as HTMLElement;
-					const leftColHeight = leftCol ? leftCol.offsetHeight : 400;
-					
-					// El panel de capas necesita al menos 80px de altura disponible
-					const maxPreviewPanelHeight = leftColHeight - 80;
-					// El panel de preview ocupa: alto_surface + 32px (toolbar) + 16px (padding/margins) = surface_height + 48px
-					const maxSurfaceHeight = maxPreviewPanelHeight - 48;
-					const maxWBasedOnHeight = Math.floor(maxSurfaceHeight * 16 / 9);
-					
-					// Asegurar al menos 320px de ancho para el mezclador y la columna derecha
-					const maxAllowedWidth = Math.min(window.innerWidth - 340, maxWBasedOnHeight);
-					const minAllowedWidth = 240;
-					
-					if (newWidth < minAllowedWidth) newWidth = minAllowedWidth;
-					if (newWidth > maxAllowedWidth) newWidth = maxAllowedWidth;
-					
-					previewSurface.style.width = `${newWidth}px`;
-					previewSurface.style.height = `${Math.round(newWidth * 9 / 16)}px`;
-					
-					// Ajustar toolbar
-					const previewToolbar = el("preview-toolbar")!;
-					if (previewToolbar) {
-						previewToolbar.style.width = `${newWidth}px`;
-					}
-					
-					// Actualizar coordenadas nativas
+			let rectSyncPending = false;
+			function schedulePreviewRectSync() {
+				if (rectSyncPending) return;
+				rectSyncPending = true;
+				requestAnimationFrame(() => {
+					rectSyncPending = false;
+					sizePreviewSurface();
 					refreshPreviewRectIfEnabled();
-				}
-			});
+				});
+			}
+			new ResizeObserver(schedulePreviewRectSync).observe(previewWrap);
+			window.addEventListener("resize", schedulePreviewRectSync);
+			sizePreviewSurface();
 
 			// ---------------------------------------------------------------
 			// Control de Pestañas
@@ -892,6 +888,11 @@ import '../styles/global.css';
 						const rect = previewRect();
 						await invoke("toggle_preview", { enabled: true, ...rect });
 						previewEnabled = true;
+						// Con libobs ya inicializado el canvas real es conocido:
+						// ajustar la proporcion del rectangulo y re-sincronizar.
+						await refreshCanvasAspect();
+						sizePreviewSurface();
+						await invoke("update_preview_rect", previewRect());
 						btn.textContent = "Desactivar preview";
 						btn.className = "text-xs font-medium text-red-400 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 rounded px-3 py-1 transition-all cursor-pointer";
 						placeholder.classList.add("hidden");
@@ -1000,6 +1001,22 @@ import '../styles/global.css';
 					yInput.addEventListener("change", pushTransform);
 					scaleXInput.addEventListener("change", pushTransform);
 					scaleYInput.addEventListener("change", pushTransform);
+
+					// Opacidad en vivo (como el mixer: "input" aplica al instante,
+					// throttled para no inundar de invokes mientras arrastran).
+					const opacityInput = node.querySelector(".overlay-opacity") as HTMLInputElement;
+					opacityInput.value = String(Math.round((overlay.opacity ?? 1) * 100));
+					opacityInput.title = `Opacidad: ${opacityInput.value}%`;
+					let opacityPending = false;
+					opacityInput.addEventListener("input", async () => {
+						opacityInput.title = `Opacidad: ${opacityInput.value}%`;
+						if (opacityPending) return;
+						opacityPending = true;
+						requestAnimationFrame(async () => {
+							opacityPending = false;
+							await invoke("set_overlay_opacity", { index: overlay.index, opacity: Number(opacityInput.value) / 100 });
+						});
+					});
 
 					const lockBtn = node.querySelector(".overlay-toggle-lock") as HTMLButtonElement;
 					lockBtn.innerHTML = overlay.locked 
