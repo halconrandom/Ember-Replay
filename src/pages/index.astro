@@ -338,6 +338,22 @@ import '../styles/global.css';
 			</div>
 		</template>
 
+		<!-- Custom Prompt Modal -->
+		<div id="custom-prompt-backdrop" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-50 items-center justify-center p-4 select-none animate-in fade-in duration-150">
+			<div class="bg-[#121215] border border-zinc-800/80 rounded-xl p-4 w-full max-w-[340px] flex flex-col gap-3 shadow-2xl animate-in zoom-in-95 duration-150">
+				<h3 id="custom-prompt-title" class="text-xs font-bold uppercase tracking-wider text-zinc-300">Renombrar Pista</h3>
+				<input type="text" id="custom-prompt-input" class="w-full bg-[#09090b] border border-zinc-700 text-zinc-200 text-xs rounded-md px-3 py-2 focus:outline-none focus:border-orange-500/50 transition-colors" />
+				<div class="flex justify-end gap-2 mt-1">
+					<button id="custom-prompt-cancel" class="px-3.5 py-1.5 text-xs font-medium text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-750 border border-zinc-700/60 rounded-md transition-all cursor-pointer">
+						Cancelar
+					</button>
+					<button id="custom-prompt-confirm" class="px-3.5 py-1.5 text-xs font-semibold text-white bg-orange-600 hover:bg-orange-500 rounded-md transition-all cursor-pointer shadow-md shadow-orange-600/10">
+						Aceptar
+					</button>
+				</div>
+			</div>
+		</div>
+
 		<script>
 			import { invoke } from "@tauri-apps/api/core";
 			import { listen } from "@tauri-apps/api/event";
@@ -396,6 +412,55 @@ import '../styles/global.css';
 			function setText(id: string, text: string) {
 				const e = el(id);
 				if (e) e.textContent = text;
+			}
+
+			function showCustomPrompt(title: string, defaultValue: string): Promise<string | null> {
+				return new Promise((resolve) => {
+					const backdrop = el("custom-prompt-backdrop")!;
+					const titleEl = el("custom-prompt-title")!;
+					const inputEl = el<HTMLInputElement>("custom-prompt-input")!;
+					const btnCancel = el("custom-prompt-cancel")!;
+					const btnConfirm = el("custom-prompt-confirm")!;
+
+					titleEl.textContent = title;
+					inputEl.value = defaultValue;
+
+					backdrop.classList.remove("hidden");
+					backdrop.classList.add("flex");
+					setTimeout(() => {
+						inputEl.focus();
+						inputEl.select();
+					}, 50);
+
+					const controller = new AbortController();
+					const signal = controller.signal;
+
+					function close(value: string | null) {
+						controller.abort();
+						backdrop.classList.add("hidden");
+						backdrop.classList.remove("flex");
+						resolve(value);
+					}
+
+					btnCancel.addEventListener("click", () => close(null), { signal });
+					
+					const confirmAction = () => {
+						const val = inputEl.value.trim();
+						close(val || null);
+					};
+					
+					btnConfirm.addEventListener("click", confirmAction, { signal });
+					
+					inputEl.addEventListener("keydown", (e) => {
+						if (e.key === "Enter") {
+							e.preventDefault();
+							confirmAction();
+						} else if (e.key === "Escape") {
+							e.preventDefault();
+							close(null);
+						}
+					}, { signal });
+				});
 			}
 
 			// ---------------------------------------------------------------
@@ -783,7 +848,7 @@ import '../styles/global.css';
 					const labelEl = node.querySelector(".track-label") as HTMLElement;
 					labelEl.textContent = source.label;
 					labelEl.addEventListener("click", async () => {
-						const newName = prompt("Renombrar pista de audio:", labelEl.textContent ?? "");
+						const newName = await showCustomPrompt("Renombrar pista de audio:", labelEl.textContent ?? "");
 						if (newName !== null && newName.trim() !== "") {
 							try {
 								const updated = await invoke<AudioSourceConfig[]>("set_audio_source_label", { index, label: newName.trim() });
