@@ -29,6 +29,10 @@ import '../styles/global.css';
 				}
 			}
 
+			// Expuesto para que el backend pueda forzar el estado via eval()
+			// aunque el evento no llegue.
+			(window as any).__setStatus = updateStatus;
+
 			// Check URL parameter on load
 			const params = new URLSearchParams(window.location.search);
 			const activeParam = params.get("active");
