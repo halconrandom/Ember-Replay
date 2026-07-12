@@ -715,10 +715,18 @@ unsafe fn ensure_obs_platform_initialized() -> Result<(), String> {
   // libobs busca sus archivos core (shaders/effects) con una ruta
   // hardcodeada "../../data/libobs/" relativa al CWD del proceso, no al
   // ejecutable (ver vendor/obs-studio/libobs/obs-windows.c,
-  // find_libobs_data_file). Fijamos el CWD al directorio del .exe para que
-  // esa cuenta de "subir 2 niveles" de siempre en el mismo lugar
-  // (build.rs copia data/ ahi: target/<profile>/../../data).
-  std::env::set_current_dir(&base).map_err(|e| format!("no se pudo fijar el directorio de trabajo: {e}"))?;
+  // find_libobs_data_file) -- no hay API publica para overridear esto.
+  // "data/" en si vive JUNTO al .exe (build.rs la copia ahi, y es tambien
+  // donde el instalador NSIS deja los recursos empaquetados: en Windows
+  // `resource_dir()` de Tauri == el directorio del ejecutable). Para que
+  // la cuenta de "subir 2 niveles" de libobs siga dando con "data/" sin
+  // tener que parchear su C, fijamos el CWD en un subdirectorio ficticio
+  // 2 niveles por debajo de `base` (creado on-demand, nunca usado para
+  // nada mas) en vez de `base` directamente.
+  let cwd_anchor = base.join(".obs-cwd").join("anchor");
+  std::fs::create_dir_all(&cwd_anchor)
+    .map_err(|e| format!("no se pudo crear el directorio de trabajo para libobs: {e}"))?;
+  std::env::set_current_dir(&cwd_anchor).map_err(|e| format!("no se pudo fijar el directorio de trabajo: {e}"))?;
 
   let locale = CString::new("en-US").unwrap();
   let started = obs_ffi::obs_startup(locale.as_ptr(), std::ptr::null(), std::ptr::null_mut());
@@ -734,10 +742,13 @@ unsafe fn ensure_obs_platform_initialized() -> Result<(), String> {
   // siempre al modo legacy GDI aunque la GPU soporte DXGI perfectamente.
   apply_video_settings()?;
 
-  let data_root = base.join("../../data").to_string_lossy().replace('\\', "/");
-  let bin_path = CString::new(base.join("obs-plugins/64bit").to_string_lossy().replace('\\', "/")).unwrap();
-  let data_path = CString::new(format!("{data_root}/obs-plugins/%module%")).unwrap();
-  obs_ffi::obs_add_module_path(bin_path.as_ptr(), data_path.as_ptr());
+  // No hace falta un obs_add_module_path() manual: obs_startup ya llamo a
+  // add_default_module_paths() (obs.c), que registra "../../obs-plugins/64bit"
+  // y "../../data/obs-plugins/%module%" relativos al CWD -- con el
+  // cwd_anchor de arriba eso resuelve exactamente a base/obs-plugins/64bit y
+  // base/data/obs-plugins/%module%, que es donde build.rs ya los copio.
+  // Registrar el mismo path a mano duplicaba la carga de cada plugin
+  // ("obs_register_source: ... already exists! Duplicate library?").
   obs_ffi::obs_load_all_modules();
   obs_ffi::obs_post_load_modules();
 

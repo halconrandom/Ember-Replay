@@ -5,3 +5,5 @@
 
 # copiado por build.rs desde vendor/obs-studio (ver setup_libobs)
 /data/
+/runtime/
+/nsis-hooks.nsh
