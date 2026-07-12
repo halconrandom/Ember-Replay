@@ -4,8 +4,17 @@ mod preview;
 
 use std::ffi::{c_void, CStr, CString};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, mpsc};
 use tauri::{AppHandle, Emitter, Manager};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+  CreateWindowExW, GetMessageW, RegisterClassW, MSG, WM_HOTKEY, WNDCLASSW, WS_POPUP, PostQuitMessage,
+  DefWindowProcW, WM_DESTROY, PostMessageW, WM_USER, TranslateMessage, DispatchMessageW
+};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+  RegisterHotKey, UnregisterHotKey
+};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
 /// Wrapper para poder guardar punteros crudos de libobs en un `static`.
 /// Seguro en la practica: libobs es thread-safe para estas operaciones y
@@ -60,7 +69,6 @@ pub fn emit_event<S: serde::Serialize + Clone>(event: &str, payload: S) {
     let _ = app.emit(event, payload);
   }
 }
-static SAVE_HOTKEY_ID: Mutex<Option<obs_ffi::obs_hotkey_id>> = Mutex::new(None);
 static CONFIG: Mutex<Option<config::EmberioConfig>> = Mutex::new(None);
 static CONFIG_SAVE_TX: OnceLock<std::sync::mpsc::Sender<config::EmberioConfig>> = OnceLock::new();
 /// Nivel de audio en vivo (0.0..=1.0) por indice de fuente, actualizado por
@@ -70,6 +78,109 @@ static OBS_INIT_LOCK: Mutex<()> = Mutex::new(());
 
 
 const DEFAULT_HOTKEY_VK_F9: i32 = 0x78; // VK_F9
+
+struct SendHWND(HWND);
+unsafe impl Send for SendHWND {}
+unsafe impl Sync for SendHWND {}
+
+static HOTKEY_TX: Mutex<Option<mpsc::Sender<HotkeyCmd>>> = Mutex::new(None);
+static HOTKEY_HWND: Mutex<Option<SendHWND>> = Mutex::new(None);
+
+enum HotkeyCmd {
+  Register { vk_code: i32, ctrl: bool, shift: bool, alt: bool },
+}
+
+unsafe extern "system" fn hotkey_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+  match msg {
+    WM_HOTKEY => {
+      // El hotkey fue presionado!
+      tauri::async_runtime::spawn(save_clip_and_notify());
+      0
+    }
+    WM_DESTROY => {
+      PostQuitMessage(0);
+      0
+    }
+    _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+  }
+}
+
+fn init_native_hotkey_thread() {
+  let (tx, rx) = mpsc::channel::<HotkeyCmd>();
+  *HOTKEY_TX.lock().unwrap() = Some(tx);
+
+  std::thread::spawn(move || unsafe {
+    let class_name: Vec<u16> = "EmberHotkeyClass\0".encode_utf16().collect();
+    let wc = WNDCLASSW {
+      style: 0,
+      lpfnWndProc: Some(hotkey_wnd_proc),
+      cbClsExtra: 0,
+      cbWndExtra: 0,
+      hInstance: GetModuleHandleW(std::ptr::null()),
+      hIcon: std::ptr::null_mut(),
+      hCursor: std::ptr::null_mut(),
+      hbrBackground: std::ptr::null_mut(),
+      lpszMenuName: std::ptr::null(),
+      lpszClassName: class_name.as_ptr(),
+    };
+    RegisterClassW(&wc);
+
+    let hwnd = CreateWindowExW(
+      0,
+      class_name.as_ptr(),
+      std::ptr::null(),
+      WS_POPUP,
+      0, 0, 0, 0,
+      std::ptr::null_mut(),
+      std::ptr::null_mut(),
+      GetModuleHandleW(std::ptr::null()),
+      std::ptr::null(),
+    );
+
+    if hwnd.is_null() {
+      log::error!("No se pudo crear la ventana oculta para hotkeys");
+      return;
+    }
+
+    *HOTKEY_HWND.lock().unwrap() = Some(SendHWND(hwnd));
+
+    let mut msg: MSG = std::mem::zeroed();
+    while GetMessageW(&mut msg, hwnd, 0, 0) != 0 {
+      if msg.message == WM_USER {
+        while let Ok(cmd) = rx.try_recv() {
+          match cmd {
+            HotkeyCmd::Register { vk_code, ctrl, shift, alt } => {
+              UnregisterHotKey(hwnd, 1);
+              let mut modifiers = 0x4000; // MOD_NOREPEAT
+              if ctrl { modifiers |= 0x0002; }
+              if shift { modifiers |= 0x0004; }
+              if alt { modifiers |= 0x0001; }
+              if RegisterHotKey(hwnd, 1, modifiers, vk_code as u32) == 0 {
+                log::error!("Fallo RegisterHotKey para vk={}, mod={}", vk_code, modifiers);
+              } else {
+                log::info!("RegisterHotKey exitoso para vk={}, mod={}", vk_code, modifiers);
+              }
+            }
+          }
+        }
+      } else {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+      }
+    }
+  });
+}
+
+fn register_native_hotkey(vk_code: i32, ctrl: bool, shift: bool, alt: bool) {
+  if let Some(tx) = &*HOTKEY_TX.lock().unwrap() {
+    tx.send(HotkeyCmd::Register { vk_code, ctrl, shift, alt }).ok();
+    unsafe {
+      if let Some(hwnd) = &*HOTKEY_HWND.lock().unwrap() {
+        PostMessageW(hwnd.0, WM_USER, 0, 0);
+      }
+    }
+  }
+}
 
 #[link(name = "user32")]
 extern "system" {
@@ -828,64 +939,7 @@ unsafe fn ensure_output_started(clip_seconds: i64) -> Result<PathBuf, String> {
   Ok(clips_dir)
 }
 
-// ---------------------------------------------------------------------------
-// Hotkey de "guardar clip" (global, vale aunque Emberio no tenga foco --
-// libobs corre un thread propio que pollea el estado de teclado del sistema)
-// ---------------------------------------------------------------------------
 
-extern "C" fn save_hotkey_callback(
-  _data: *mut c_void,
-  _id: obs_ffi::obs_hotkey_id,
-  _hotkey: *mut obs_ffi::obs_hotkey_t,
-  pressed: bool,
-) {
-  if !pressed {
-    return;
-  }
-  tauri::async_runtime::spawn(save_clip_and_notify());
-}
-
-unsafe fn ensure_save_hotkey_registered() -> obs_ffi::obs_hotkey_id {
-  if let Some(id) = *SAVE_HOTKEY_ID.lock().unwrap() {
-    return id;
-  }
-
-  let name = CString::new("emberio.save_clip").unwrap();
-  let desc = CString::new("Ember: guardar clip").unwrap();
-  let id = obs_ffi::obs_hotkey_register_frontend(
-    name.as_ptr(),
-    desc.as_ptr(),
-    Some(save_hotkey_callback),
-    std::ptr::null_mut(),
-  );
-
-  let saved = with_config(|c| c.hotkey);
-  let (vk_code, modifiers) = match saved {
-    Some(h) => {
-      let mut m: u32 = 0;
-      if h.ctrl {
-        m |= obs_ffi::obs_interaction_flags_INTERACT_CONTROL_KEY as u32;
-      }
-      if h.shift {
-        m |= obs_ffi::obs_interaction_flags_INTERACT_SHIFT_KEY as u32;
-      }
-      if h.alt {
-        m |= obs_ffi::obs_interaction_flags_INTERACT_ALT_KEY as u32;
-      }
-      (h.vk_code, m)
-    }
-    None => (DEFAULT_HOTKEY_VK_F9, 0),
-  };
-
-  let mut combo = obs_ffi::obs_key_combination {
-    modifiers,
-    key: obs_ffi::obs_key_from_virtual_key(vk_code),
-  };
-  obs_ffi::obs_hotkey_load_bindings(id, &mut combo as *mut _, 1);
-
-  *SAVE_HOTKEY_ID.lock().unwrap() = Some(id);
-  id
-}
 
 /// Guarda el clip y avisa al frontend via evento (asi el boton y el hotkey
 /// global comparten el mismo camino y la UI se entera de los dos).
@@ -961,7 +1015,6 @@ async fn start_recording(clip_seconds: i64) -> Result<String, String> {
     }
     ensure_capture_started()?;
     let clips_dir = ensure_output_started(clip_seconds)?;
-    ensure_save_hotkey_registered();
 
     with_config(|c| c.clip_seconds = clip_seconds);
     persist_config();
@@ -977,19 +1030,8 @@ async fn start_recording(clip_seconds: i64) -> Result<String, String> {
 /// escena). libobs en si (obs_startup) queda inicializado para poder volver
 /// a arrancar rapido con start_recording.
 unsafe fn cleanup_capture_if_idle() {
-  let preview_active = PREVIEW_STATE.lock().unwrap().is_some();
-  let recording_active = OUTPUT_STATE.lock().unwrap().is_some();
-  if !preview_active && !recording_active {
-    // Sacar el estado y SOLTAR el lock antes de llamar a libobs (destruir
-    // fuentes espera al thread grafico; no queremos estar sosteniendo
-    // CAPTURE_STATE mientras tanto).
-    let state_opt = { CAPTURE_STATE.lock().unwrap().take() };
-    if let Some(state) = state_opt {
-      release_capture_state(state);
-    }
-    preview::clear_selection();
-    AUDIO_LEVELS.lock().unwrap().clear();
-  }
+  // Dejamos la captura activa en segundo plano para que el mezclador de audio
+  // y los atajos globales nativos sigan funcionando siempre de manera continua.
 }
 
 /// Libera todos los recursos de libobs de un CaptureState ya sacado del
@@ -1053,39 +1095,19 @@ fn save_clip_now() {
 /// que en Windows coincide con los VK_* para teclas comunes).
 #[tauri::command]
 fn set_save_hotkey(vk_code: i32, ctrl: bool, shift: bool, alt: bool) -> Result<String, String> {
-  unsafe {
-    if !obs_ffi::obs_initialized() {
-      return Err("Llama a start_recording primero (libobs no esta inicializado)".into());
-    }
-    let id = ensure_save_hotkey_registered();
+  register_native_hotkey(vk_code, ctrl, shift, alt);
 
-    let mut modifiers: u32 = 0;
-    if ctrl {
-      modifiers |= obs_ffi::obs_interaction_flags_INTERACT_CONTROL_KEY as u32;
-    }
-    if shift {
-      modifiers |= obs_ffi::obs_interaction_flags_INTERACT_SHIFT_KEY as u32;
-    }
-    if alt {
-      modifiers |= obs_ffi::obs_interaction_flags_INTERACT_ALT_KEY as u32;
-    }
+  with_config(|c| c.hotkey = Some(config::HotkeyConfig { vk_code, ctrl, shift, alt }));
+  persist_config();
 
-    let key = obs_ffi::obs_key_from_virtual_key(vk_code);
-    let mut combo = obs_ffi::obs_key_combination { modifiers, key };
-    obs_ffi::obs_hotkey_load_bindings(id, &mut combo as *mut _, 1);
+  let combo_desc = format!(
+    "{}{}{}vk={vk_code}",
+    if ctrl { "Ctrl+" } else { "" },
+    if shift { "Shift+" } else { "" },
+    if alt { "Alt+" } else { "" },
+  );
 
-    with_config(|c| c.hotkey = Some(config::HotkeyConfig { vk_code, ctrl, shift, alt }));
-    persist_config();
-
-    let combo_desc = format!(
-      "{}{}{}vk={vk_code}",
-      if ctrl { "Ctrl+" } else { "" },
-      if shift { "Shift+" } else { "" },
-      if alt { "Alt+" } else { "" },
-    );
-
-    Ok(format!("Hotkey de guardado ahora es: {combo_desc}"))
-  }
+  Ok(format!("Hotkey de guardado ahora es: {combo_desc}"))
 }
 
 /// Cambia donde se guardan los clips. Si ya estas grabando, el output ya
@@ -1796,7 +1818,30 @@ pub fn run() {
         )?;
       }
       let _ = APP_HANDLE.set(app.handle().clone());
-      *CONFIG.lock().unwrap() = Some(config::load(app.handle()));
+      let latest_cfg = config::load(app.handle());
+      *CONFIG.lock().unwrap() = Some(latest_cfg.clone());
+
+      // Inicializar el hilo de hotkey global nativo
+      init_native_hotkey_thread();
+
+      // Cargar el hotkey guardado en la configuracion
+      let loaded_hotkey = latest_cfg.hotkey;
+      if let Some(h) = loaded_hotkey {
+        register_native_hotkey(h.vk_code, h.ctrl, h.shift, h.alt);
+      } else {
+        register_native_hotkey(DEFAULT_HOTKEY_VK_F9, false, false, false);
+      }
+
+      // Inicializar libobs y arrancar la captura en segundo plano
+      tauri::async_runtime::spawn(async {
+        unsafe {
+          if let Err(e) = ensure_obs_platform_initialized() {
+            log::error!("Error al inicializar libobs en setup: {}", e);
+          } else if let Err(e) = ensure_capture_started() {
+            log::error!("Error al iniciar captura en setup: {}", e);
+          }
+        }
+      });
 
       // Emisor periodico de niveles de audio para el mixer en vivo -- lee
       // AUDIO_LEVELS (que van llenando los callbacks de volmeter) y la
