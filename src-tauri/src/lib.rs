@@ -75,6 +75,11 @@ static CONFIG_SAVE_TX: OnceLock<std::sync::mpsc::Sender<config::EmberioConfig>> 
 /// los callbacks de volmeter y emitido periodicamente al frontend.
 static AUDIO_LEVELS: Mutex<Vec<f32>> = Mutex::new(Vec::new());
 static OBS_INIT_LOCK: Mutex<()> = Mutex::new(());
+/// (resolucion, fps) que ya estan aplicados en libobs. obs_reset_video /
+/// obs_reset_audio son un teardown pesado de todo el pipeline -- solo hay
+/// que correrlos cuando la config realmente cambio, no en cada arranque
+/// del replay buffer.
+static LAST_APPLIED_VIDEO: Mutex<Option<(String, i64)>> = Mutex::new(None);
 
 
 const DEFAULT_HOTKEY_VK_F9: i32 = 0x78; // VK_F9
@@ -224,10 +229,129 @@ fn play_notification_sound() {
   }
 }
 
-fn create_native_overlay_window(app: &AppHandle, window_id: &str, route: &str, width: f64, height: f64, offset_y: f64) {
-  let (screen_w, screen_h) = primary_monitor_size();
-  let x = (screen_w as f64) - width - 20.0;
-  let y = (screen_h as f64) - height - offset_y;
+/// Convierte un buffer UTF-16 fijo de la API de Windows (terminado en NUL)
+/// a String.
+fn utf16_trimmed(buf: &[u16]) -> String {
+  let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+  String::from_utf16_lossy(&buf[..len])
+}
+
+/// Mapea el device path DXGI que guarda OBS como monitor_id (ej.
+/// "\\?\DISPLAY#GSM5CDE#5&...#{...}") al nombre GDI del adaptador
+/// ("\\.\DISPLAY1"), que es el mismo nombre que reporta
+/// tauri::Monitor::name(). Sin este mapeo nunca hay match y el indicador
+/// terminaba en el monitor equivocado.
+fn monitor_gdi_name_for_device_path(device_path: &str) -> Option<String> {
+  use windows_sys::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW};
+  const EDD_GET_DEVICE_INTERFACE_NAME: u32 = 1;
+  unsafe {
+    for i in 0..16u32 {
+      let mut adapter: DISPLAY_DEVICEW = std::mem::zeroed();
+      adapter.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+      if EnumDisplayDevicesW(std::ptr::null(), i, &mut adapter, 0) == 0 {
+        break;
+      }
+      let mut mon: DISPLAY_DEVICEW = std::mem::zeroed();
+      mon.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+      if EnumDisplayDevicesW(adapter.DeviceName.as_ptr(), 0, &mut mon, EDD_GET_DEVICE_INTERFACE_NAME) == 0 {
+        continue;
+      }
+      if utf16_trimmed(&mon.DeviceID).eq_ignore_ascii_case(device_path) {
+        return Some(utf16_trimmed(&adapter.DeviceName));
+      }
+    }
+  }
+  None
+}
+
+fn get_target_monitor(app: &AppHandle) -> Option<tauri::Monitor> {
+  let source_type = with_config(|c| c.video_source_type.clone());
+  let source_id = with_config(|c| c.video_source_id.clone());
+
+  let mut target_monitor = None;
+
+  if source_type == "screen" {
+    if let Some(id) = source_id {
+      if let Ok(monitors) = app.available_monitors() {
+        if let Some(gdi_name) = monitor_gdi_name_for_device_path(&id) {
+          target_monitor = monitors.iter().find(|m| m.name() == Some(&gdi_name)).cloned();
+        }
+        if target_monitor.is_none() {
+          if let Ok(idx) = id.parse::<usize>() {
+            target_monitor = monitors.get(idx).cloned();
+          } else {
+            target_monitor = monitors.into_iter().find(|m| m.name() == Some(&id));
+          }
+        }
+      }
+    }
+  }
+
+  if target_monitor.is_none() {
+    let main_win = app.get_webview_window("main");
+    target_monitor = main_win
+      .as_ref()
+      .and_then(|w| w.current_monitor().ok().flatten());
+  }
+
+  if target_monitor.is_none() {
+    target_monitor = app.primary_monitor().ok().flatten();
+  }
+
+  target_monitor
+}
+
+fn calculate_corner_position(
+  monitor: &tauri::Monitor,
+  width: f64,
+  height: f64,
+  offset_x: f64,
+  offset_y: f64,
+) -> (tauri::PhysicalPosition<i32>, tauri::LogicalPosition<f64>) {
+  let pos = monitor.position();
+  let size = monitor.size();
+  let scale = monitor.scale_factor();
+
+  let width_phys = (width * scale).round() as i32;
+  let height_phys = (height * scale).round() as i32;
+  let offset_x_phys = (offset_x * scale).round() as i32;
+  let offset_y_phys = (offset_y * scale).round() as i32;
+
+  let target_x_phys = pos.x + (size.width as i32) - width_phys - offset_x_phys;
+  let target_y_phys = pos.y + (size.height as i32) - height_phys - offset_y_phys;
+
+  let phys_pos = tauri::PhysicalPosition::new(target_x_phys, target_y_phys);
+  let logical_pos = tauri::LogicalPosition::new(
+    (target_x_phys as f64) / scale,
+    (target_y_phys as f64) / scale,
+  );
+
+  (phys_pos, logical_pos)
+}
+
+fn create_native_overlay_window(
+  app: &AppHandle,
+  window_id: &str,
+  route: &str,
+  width: f64,
+  height: f64,
+  offset_x: f64,
+  offset_y: f64,
+) {
+  let target_monitor = get_target_monitor(app);
+
+  let (phys_pos, logical_pos) = match target_monitor {
+    Some(ref m) => calculate_corner_position(m, width, height, offset_x, offset_y),
+    None => {
+      let (screen_w, screen_h) = primary_monitor_size();
+      let tx = (screen_w as f64) - width - offset_x;
+      let ty = (screen_h as f64) - height - offset_y;
+      (
+        tauri::PhysicalPosition::new(tx as i32, ty as i32),
+        tauri::LogicalPosition::new(tx, ty),
+      )
+    }
+  };
 
   let builder = tauri::WebviewWindowBuilder::new(
     app,
@@ -236,7 +360,10 @@ fn create_native_overlay_window(app: &AppHandle, window_id: &str, route: &str, w
   )
   .title("Ember Overlay")
   .inner_size(width, height)
-  .position(x, y)
+  // Ver show_status_notification: sin min_inner_size Windows clampea al
+  // minimo de tracking (~136px) y la ventana desborda el borde del monitor.
+  .min_inner_size(16.0, 16.0)
+  .position(logical_pos.x, logical_pos.y)
   .resizable(false)
   .decorations(false)
   .transparent(true)
@@ -245,6 +372,8 @@ fn create_native_overlay_window(app: &AppHandle, window_id: &str, route: &str, w
   .shadow(false);
 
   if let Ok(win) = builder.build() {
+    let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, height)));
+    let _ = win.set_position(tauri::Position::Physical(phys_pos));
     unsafe {
       if let Ok(hwnd) = win.hwnd() {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -263,79 +392,48 @@ fn show_toast_notification(app: &AppHandle, clip_time: i64) {
   play_notification_sound();
 
   let route = format!("toast?time={clip_time}");
-  if let Some(_) = app.get_webview_window("clip_toast") {
+  if let Some(win) = app.get_webview_window("clip_toast") {
     let _ = app.emit("show-toast", clip_time);
+    if let Some(m) = get_target_monitor(app) {
+      let (phys_pos, _) = calculate_corner_position(&m, 280.0, 70.0, 20.0, 60.0);
+      let _ = win.set_position(tauri::Position::Physical(phys_pos));
+    }
     return;
   }
 
-  create_native_overlay_window(app, "clip_toast", &route, 280.0, 70.0, 60.0);
+  create_native_overlay_window(app, "clip_toast", &route, 280.0, 70.0, 20.0, 60.0);
 }
 
 fn show_status_notification(app: &AppHandle, active: bool) {
   let route = format!("status_toast?active={active}");
 
-  // Buscar en la config que monitor se quiere capturar
-  let source_type = with_config(|c| c.video_source_type.clone());
-  let source_id = with_config(|c| c.video_source_id.clone());
-
-  let mut target_monitor = None;
-
-  if source_type == "screen" {
-    if let Some(id) = source_id {
-      if let Ok(monitors) = app.available_monitors() {
-        if let Ok(idx) = id.parse::<usize>() {
-          target_monitor = monitors.get(idx).cloned();
-        } else {
-          target_monitor = monitors.into_iter().find(|m| m.name() == Some(&id));
-        }
-      }
-    }
-  }
-
-  // Fallback 1: Monitor donde esta la ventana principal
-  if target_monitor.is_none() {
-    let main_win = app.get_webview_window("main");
-    target_monitor = main_win
-      .as_ref()
-      .and_then(|w| w.current_monitor().ok().flatten());
-  }
-
-  // Fallback 2: Monitor primario de la aplicacion
-  if target_monitor.is_none() {
-    target_monitor = app.primary_monitor().ok().flatten();
-  }
-
-  let (x, y) = match target_monitor {
-    Some(m) => {
-      let pos = m.position();
-      let size = m.size();
-      let scale = m.scale_factor();
-      let monitor_x = (pos.x as f64) / scale;
-      let monitor_y = (pos.y as f64) / scale;
-      let monitor_w = (size.width as f64) / scale;
-      let monitor_h = (size.height as f64) / scale;
-
-      let width = 36.0;
-      let height = 36.0;
-      let target_x = monitor_x + monitor_w - width - 15.0;
-      let target_y = monitor_y + monitor_h - height - 55.0;
-      (target_x, target_y)
-    }
+  let target_monitor = get_target_monitor(app);
+  let (phys_pos, logical_pos) = match target_monitor {
+    Some(ref m) => calculate_corner_position(m, 36.0, 36.0, 15.0, 55.0),
     None => {
       let (screen_w, screen_h) = primary_monitor_size();
-      let width = 36.0;
-      let height = 36.0;
-      let target_x = (screen_w as f64) - width - 15.0;
-      let target_y = (screen_h as f64) - height - 55.0;
-      (target_x, target_y)
+      let tx = (screen_w as f64) - 36.0 - 15.0;
+      let ty = (screen_h as f64) - 36.0 - 55.0;
+      (
+        tauri::PhysicalPosition::new(tx as i32, ty as i32),
+        tauri::LogicalPosition::new(tx, ty),
+      )
     }
   };
 
-  let target_pos = tauri::Position::Logical(tauri::LogicalPosition::new(x, y));
-
   if let Some(win) = app.get_webview_window("status_toast") {
     let _ = app.emit("show-status", active);
-    let _ = win.set_position(target_pos);
+    // Fallback directo por si el evento no llega (webview suspendido o
+    // permisos de eventos): setea el color inyectando JS.
+    let _ = win.eval(&format!("window.__setStatus && window.__setStatus({active})"));
+    let _ = win.set_position(tauri::Position::Physical(phys_pos));
+    let _ = win.show();
+    log::info!(
+      "status_toast: active={active}, monitor={:?}, pos=({}, {})",
+      target_monitor.as_ref().and_then(|m| m.name().cloned()),
+      phys_pos.x,
+      phys_pos.y
+    );
     return;
   }
 
@@ -346,7 +444,11 @@ fn show_status_notification(app: &AppHandle, active: bool) {
   )
   .title("Ember Status")
   .inner_size(36.0, 36.0)
-  .position(x, y)
+  // Sin esto Windows clampea la ventana al minimo de tracking del sistema
+  // (~136px de ancho): el calculo de esquina asume 36px y la ventana
+  // desbordaba el borde del monitor, cayendo en la pantalla de al lado.
+  .min_inner_size(16.0, 16.0)
+  .position(logical_pos.x, logical_pos.y)
   .resizable(false)
   .decorations(false)
   .transparent(true)
@@ -356,6 +458,8 @@ fn show_status_notification(app: &AppHandle, active: bool) {
 
   match builder.build() {
     Ok(win) => {
+      let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(36.0, 36.0)));
+      let _ = win.set_position(tauri::Position::Physical(phys_pos));
       unsafe {
         if let Ok(hwnd) = win.hwnd() {
           use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -575,7 +679,27 @@ unsafe fn apply_video_settings() -> Result<(), String> {
     return Err("obs_reset_audio fallo".into());
   }
 
+  *LAST_APPLIED_VIDEO.lock().unwrap() = Some((resolution, fps));
+
   Ok(())
+}
+
+/// Reaplica resolucion/FPS solo si cambiaron desde la ultima aplicacion y el
+/// video no esta activo. Antes se llamaba a apply_video_settings() en cada
+/// arranque del replay buffer aunque nada hubiera cambiado; ese
+/// obs_reset_video/obs_reset_audio gratuito despues de un stop+start era la
+/// ventana del crash STATUS_ACCESS_VIOLATION al re-crear los encoders.
+unsafe fn reapply_video_settings_if_changed() -> Result<(), String> {
+  let current = with_config(|c| (c.resolution.clone(), c.fps));
+  if LAST_APPLIED_VIDEO.lock().unwrap().as_ref() == Some(&current) {
+    return Ok(());
+  }
+  if obs_ffi::obs_video_active() {
+    // No se puede resetear con video activo; tomara efecto en el proximo
+    // arranque en frio.
+    return Ok(());
+  }
+  apply_video_settings()
 }
 
 /// Arranca libobs y carga los plugins. Corre una sola vez por proceso (a
@@ -733,7 +857,7 @@ unsafe fn ensure_capture_started() -> Result<(), String> {
 
   // 4. Agregar fuentes de audio (wasapi desktop y microfonos)
   let mut audio_sources = Vec::new();
-  let mut audio_volmeters = Vec::new();
+  let mut audio_volmeters: Vec<*mut obs_ffi::obs_volmeter_t> = Vec::new();
   for (idx, entry) in audio_sources_cfg.iter().enumerate() {
     let source_id = match entry.kind {
       config::AudioSourceKind::Output => "wasapi_output_capture",
@@ -752,6 +876,12 @@ unsafe fn ensure_capture_started() -> Result<(), String> {
       obs_ffi::obs_data_release(settings);
     }
     if source.is_null() {
+      for v in &audio_volmeters {
+        if !v.is_null() {
+          obs_ffi::obs_volmeter_detach_source(*v);
+          obs_ffi::obs_volmeter_destroy(*v);
+        }
+      }
       for s in &audio_sources {
         obs_ffi::obs_source_release(*s);
       }
@@ -1160,8 +1290,8 @@ async fn toggle_recording_and_notify() {
         log::error!("Error al inicializar libobs en toggle: {}", e);
         return;
       }
-      if !obs_ffi::obs_video_active() {
-        let _ = apply_video_settings();
+      if let Err(e) = reapply_video_settings_if_changed() {
+        log::error!("Error al reaplicar video settings en toggle: {}", e);
       }
       if let Err(e) = ensure_capture_started() {
         log::error!("Error al iniciar captura en toggle: {}", e);
@@ -1233,11 +1363,10 @@ fn get_obs_version() -> String {
 async fn start_recording(clip_seconds: i64) -> Result<String, String> {
   unsafe {
     ensure_obs_platform_initialized()?;
-    // Solo reaplicamos video/FPS/resolucion si el subsistema de video de OBS no esta activo.
-    // obs_reset_video falla/crashea si hay grabacion o PREVIEW en curso.
-    if !obs_ffi::obs_video_active() {
-      apply_video_settings()?;
-    }
+    // Solo reaplicamos video/FPS/resolucion si cambiaron y el subsistema de
+    // video de OBS no esta activo. obs_reset_video falla/crashea si hay
+    // grabacion en curso, y resetear sin necesidad abre ventanas de crash.
+    reapply_video_settings_if_changed()?;
     ensure_capture_started()?;
     let clips_dir = ensure_output_started(clip_seconds)?;
 
