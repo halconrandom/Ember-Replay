@@ -601,7 +601,10 @@ unsafe fn ensure_capture_started() -> Result<(), String> {
     } else {
       let key_c = CString::new("window").unwrap();
       obs_ffi::obs_data_set_string(settings, key_c.as_ptr(), val_c.as_ptr());
-      if source_plugin == "game_capture" {
+      if source_plugin == "window_capture" {
+        let method_key = CString::new("method").unwrap();
+        obs_ffi::obs_data_set_int(settings, method_key.as_ptr(), 2);
+      } else if source_plugin == "game_capture" {
         let mode_key = CString::new("capture_mode").unwrap();
         let mode_val = CString::new("window").unwrap();
         obs_ffi::obs_data_set_string(settings, mode_key.as_ptr(), mode_val.as_ptr());
@@ -1247,7 +1250,10 @@ unsafe fn build_capture_settings(source_plugin: &str, source_id: &str) -> *mut o
   } else {
     let key_c = CString::new("window").unwrap();
     obs_ffi::obs_data_set_string(settings, key_c.as_ptr(), val_c.as_ptr());
-    if source_plugin == "game_capture" {
+    if source_plugin == "window_capture" {
+      let method_key = CString::new("method").unwrap();
+      obs_ffi::obs_data_set_int(settings, method_key.as_ptr(), 2);
+    } else if source_plugin == "game_capture" {
       let mode_key = CString::new("capture_mode").unwrap();
       let mode_val = CString::new("window").unwrap();
       obs_ffi::obs_data_set_string(settings, mode_key.as_ptr(), mode_val.as_ptr());

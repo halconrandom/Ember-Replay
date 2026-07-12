@@ -48,6 +48,11 @@ fn setup_libobs() {
         .allowlist_function("proc_handler_.*")
         .allowlist_function("bfree")
         .allowlist_type("obs_interaction_flags")
+        // Preview: obs_display dibuja via la API de graficos de libobs
+        // (gs_*), que no tiene el prefijo "obs_".
+        .allowlist_function("gs_.*")
+        .allowlist_type("gs_.*")
+        .allowlist_type("vec2")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("No se pudieron generar los bindings de libobs");
@@ -67,6 +72,15 @@ fn setup_libobs() {
 
     copy_files_flat(&rundir.join("bin/64bit"), &target_dir);
     copy_dir_recursive(&rundir.join("obs-plugins/64bit"), &target_dir.join("obs-plugins/64bit"));
+
+    // Copiar el graphics-hook64.dll necesario para capturar juegos (game_capture)
+    let hook_src = emberio_root.join("build_x64/plugins/win-capture/graphics-hook/RelWithDebInfo/graphics-hook64.dll");
+    if hook_src.exists() {
+        let hook_dst_exe = target_dir.join("graphics-hook64.dll");
+        let hook_dst_plugin = target_dir.join("obs-plugins/64bit/graphics-hook64.dll");
+        fs::copy(&hook_src, &hook_dst_exe).ok();
+        fs::copy(&hook_src, &hook_dst_plugin).ok();
+    }
 
     // OJO: "data/" NO va junto al .exe. libobs busca sus archivos core
     // (shaders/effects) con una ruta hardcodeada "../../data/libobs/"
