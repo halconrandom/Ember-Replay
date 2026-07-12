@@ -65,6 +65,46 @@ static DRAG_ACTION: Mutex<DragAction> = Mutex::new(DragAction::None);
 /// Resolucion base actual del canvas de OBS.
 static CANVAS_SIZE: Mutex<(u32, u32)> = Mutex::new((1920, 1080));
 
+/// Rectangulo (x, y, w, h en coordenadas de canvas) del overlay seleccionado,
+/// precalculado desde el thread de UI. El callback de render SOLO lee este
+/// valor -- nunca debe tocar CAPTURE_STATE/CONFIG desde el thread grafico de
+/// libobs, porque el thread de UI toma esos locks mientras llama funciones de
+/// libobs que a su vez esperan al thread grafico (deadlock AB-BA: la app se
+/// congelaba y la ventana quedaba en blanco).
+static SELECTION_RECT: Mutex<Option<(f32, f32, f32, f32)>> = Mutex::new(None);
+
+/// Recalcula SELECTION_RECT desde el thread de UI. Llamar cada vez que cambia
+/// la seleccion o el transform del overlay seleccionado.
+pub fn refresh_selection_rect() {
+  let selected = *SELECTED_OVERLAY.lock().unwrap();
+  let rect = selected.and_then(|index| unsafe { crate::get_overlay_rect(index) });
+  *SELECTION_RECT.lock().unwrap() = rect;
+}
+
+/// Limpia seleccion y drag (ej. cuando se elimina/reordena un overlay y los
+/// indices dejan de valer).
+pub fn clear_selection() {
+  *SELECTED_OVERLAY.lock().unwrap() = None;
+  *DRAG_ACTION.lock().unwrap() = DragAction::None;
+  *SELECTION_RECT.lock().unwrap() = None;
+}
+
+/// Rectangulo de vista (left, top, ancho, alto) en coordenadas de canvas
+/// (origen arriba-izquierda, igual que los scene items de OBS), aplicando
+/// zoom y paneo. Usado tanto por el render como por el mapeo del mouse para
+/// que siempre coincidan.
+fn view_rect(base_w: u32, base_h: u32) -> (f32, f32, f32, f32) {
+  let (zoom, pan_x, pan_y) = {
+    let params = PREVIEW_PARAMS.lock().unwrap();
+    (params.zoom, params.pan_x, params.pan_y)
+  };
+  let vw = base_w as f32 / zoom;
+  let vh = base_h as f32 / zoom;
+  let left = (base_w as f32 - vw) / 2.0 - pan_x;
+  let top = (base_h as f32 - vh) / 2.0 - pan_y;
+  (left, top, vw, vh)
+}
+
 pub fn client_to_canvas(click_x: i32, click_y: i32, cx: i32, cy: i32) -> Option<(f32, f32)> {
   let (base_w, base_h) = *CANVAS_SIZE.lock().unwrap();
   if base_w == 0 || base_h == 0 || cx == 0 || cy == 0 {
@@ -78,40 +118,23 @@ pub fn client_to_canvas(click_x: i32, click_y: i32, cx: i32, cy: i32) -> Option<
   let off_y = (cy - scaled_h) / 2;
 
   let px = click_x - off_x;
-  let py = (cy - click_y) - off_y; // Invertir Y para OBS space
+  let py = click_y - off_y;
 
   if px >= 0 && px < scaled_w && py >= 0 && py < scaled_h {
-    let (zoom, pan_x, pan_y) = {
-      let params = PREVIEW_PARAMS.lock().unwrap();
-      (params.zoom, params.pan_x, params.pan_y)
-    };
-
-    let half_w = (base_w as f32 / 2.0) / zoom;
-    let half_h = (base_h as f32 / 2.0) / zoom;
-    let left = base_w as f32 / 2.0 - half_w - pan_x;
-    let right = base_w as f32 / 2.0 + half_w - pan_x;
-    let bottom = base_h as f32 / 2.0 - half_h - pan_y;
-    let top = base_h as f32 / 2.0 + half_h - pan_y;
-
+    let (view_left, view_top, view_w, view_h) = view_rect(base_w, base_h);
     let frac_x = px as f32 / scaled_w as f32;
     let frac_y = py as f32 / scaled_h as f32;
-
-    let canvas_x = left + frac_x * (right - left);
-    let canvas_y = bottom + frac_y * (top - bottom);
-
-    // En OBS, las coordenadas de los scene items tienen origen arriba-izquierda (top-left).
-    // canvas_y en la proyección va de abajo hacia arriba (bottom-up).
-    // Para convertir canvas_y a coordenadas de scene item (top-down):
-    let scene_y = base_h as f32 - canvas_y;
-
-    Some((canvas_x, scene_y))
+    Some((view_left + frac_x * view_w, view_top + frac_y * view_h))
   } else {
     None
   }
 }
 
-fn check_corner_click(canvas_x: f32, canvas_y: f32, x: f32, y: f32, w: f32, h: f32, zoom: f32) -> Option<ResizeCorner> {
-  let threshold = 12.0 / zoom;
+/// `screen_to_canvas` = pixeles de canvas por pixel de pantalla (inversa de
+/// letterbox_scale * zoom): asi el area de agarre de la esquina mide siempre
+/// ~14px reales en pantalla, sin importar zoom ni tamano del preview.
+fn check_corner_click(canvas_x: f32, canvas_y: f32, x: f32, y: f32, w: f32, h: f32, screen_to_canvas: f32) -> Option<ResizeCorner> {
+  let threshold = 14.0 * screen_to_canvas;
   let threshold_sq = threshold * threshold;
 
   let dist_sq = |cx: f32, cy: f32| {
@@ -138,6 +161,10 @@ fn check_corner_click(canvas_x: f32, canvas_y: f32, x: f32, y: f32, w: f32, h: f
 
 pub fn set_canvas_size(w: u32, h: u32) {
   *CANVAS_SIZE.lock().unwrap() = (w, h);
+}
+
+pub fn canvas_size() -> (u32, u32) {
+  *CANVAS_SIZE.lock().unwrap()
 }
 
 pub struct PreviewState {
@@ -173,7 +200,7 @@ pub fn reset_zoom() {
   emit_preview_params_change();
 }
 
-unsafe fn draw_selection_box(x: f32, y: f32, w: f32, h: f32, base_h: u32) {
+unsafe fn draw_selection_box(x: f32, y: f32, w: f32, h: f32, handle_size: f32) {
   let effect = obs_ffi::obs_get_base_effect(obs_ffi::obs_base_effect_OBS_EFFECT_SOLID);
   if effect.is_null() {
     return;
@@ -188,11 +215,11 @@ unsafe fn draw_selection_box(x: f32, y: f32, w: f32, h: f32, base_h: u32) {
   let border_color = vec4_of(0.88, 0.35, 0.06, 0.9);
   obs_ffi::gs_effect_set_vec4(color_param, &border_color as *const _);
 
-  // Convert to bottom-up coordinates for drawing
+  // Coordenadas de canvas top-left, igual que la proyeccion del render.
   let left = x;
   let right = x + w;
-  let bottom = base_h as f32 - (y + h);
-  let top = base_h as f32 - y;
+  let top = y;
+  let bottom = y + h;
 
   let passes = obs_ffi::gs_technique_begin(technique);
   for i in 0..passes {
@@ -212,8 +239,9 @@ unsafe fn draw_selection_box(x: f32, y: f32, w: f32, h: f32, base_h: u32) {
     obs_ffi::gs_vertex2f(left, bottom);
     obs_ffi::gs_vertex2f(left, top);
 
-    // Corner handle size in canvas pixels (e.g. 6 pixels)
-    let hs = 6.0;
+    // Tamano del handle en pixeles de canvas (ya escalado para que se vea
+    // constante en pantalla, lo pasa el caller).
+    let hs = handle_size;
 
     // Draw 4 square handles at the corners using lines
     for cx in &[left, right] {
@@ -251,15 +279,23 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
       let cy = rect.bottom - rect.top;
 
       let zoom = PREVIEW_PARAMS.lock().unwrap().zoom;
+      // Pixeles de canvas por pixel de pantalla (para el area de agarre).
+      let (base_w, base_h) = *CANVAS_SIZE.lock().unwrap();
+      let letterbox = if base_w > 0 && cx > 0 {
+        (cx as f32 / base_w as f32).min(cy as f32 / base_h.max(1) as f32)
+      } else {
+        1.0
+      };
+      let screen_to_canvas = 1.0 / (letterbox * zoom).max(0.0001);
 
       if let Some((canvas_x, canvas_y)) = client_to_canvas(x, y, cx, cy) {
         // First check if they clicked a corner of the CURRENTLY selected overlay
         let current_selected = *SELECTED_OVERLAY.lock().unwrap();
         let mut drag_started = false;
-        
+
         if let Some(index) = current_selected {
           if let Some((ox, oy, ow, oh)) = crate::get_overlay_rect(index) {
-            if let Some(corner) = check_corner_click(canvas_x, canvas_y, ox, oy, ow, oh, zoom) {
+            if let Some(corner) = check_corner_click(canvas_x, canvas_y, ox, oy, ow, oh, screen_to_canvas) {
               let (w_orig, h_orig, sx, sy) = crate::get_overlay_source_dims_and_scale(index).unwrap_or((1.0, 1.0, 1.0, 1.0));
               *DRAG_ACTION.lock().unwrap() = DragAction::ResizeOverlay {
                 index,
@@ -293,6 +329,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
         *SELECTED_OVERLAY.lock().unwrap() = None;
         *DRAG_ACTION.lock().unwrap() = DragAction::Pan;
       }
+      refresh_selection_rect();
       0
     }
     windows_sys::Win32::UI::WindowsAndMessaging::WM_MBUTTONDOWN => {
@@ -301,6 +338,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
       *LAST_MOUSE.lock().unwrap() = Some((x, y));
       *SELECTED_OVERLAY.lock().unwrap() = None;
       *DRAG_ACTION.lock().unwrap() = DragAction::Pan;
+      refresh_selection_rect();
       0
     }
     windows_sys::Win32::UI::WindowsAndMessaging::WM_LBUTTONUP => {
@@ -470,7 +508,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
                 let mut params = PREVIEW_PARAMS.lock().unwrap();
                 let scale_factor = params.zoom;
                 params.pan_x += (dx as f32) / scale_factor;
-                params.pan_y -= (dy as f32) / scale_factor;
+                params.pan_y += (dy as f32) / scale_factor;
                 drop(params);
                 emit_preview_params_change();
               }
@@ -532,6 +570,44 @@ unsafe fn vec4_of(r: f32, g: f32, b: f32, a: f32) -> obs_ffi::vec4 {
   v
 }
 
+unsafe fn draw_canvas_border(base_w: u32, base_h: u32) {
+  let effect = obs_ffi::obs_get_base_effect(obs_ffi::obs_base_effect_OBS_EFFECT_SOLID);
+  if effect.is_null() {
+    return;
+  }
+  let technique = obs_ffi::gs_effect_get_technique(effect, b"Solid\0".as_ptr() as *const _);
+  let color_param = obs_ffi::gs_effect_get_param_by_name(effect, b"color\0".as_ptr() as *const _);
+  if technique.is_null() || color_param.is_null() {
+    return;
+  }
+
+  // Border color: Subtle canvas outline gray (0.25, 0.25, 0.25, 0.8)
+  let border_color = vec4_of(0.25, 0.25, 0.25, 0.8);
+  obs_ffi::gs_effect_set_vec4(color_param, &border_color as *const _);
+
+  let passes = obs_ffi::gs_technique_begin(technique);
+  for i in 0..passes {
+    obs_ffi::gs_technique_begin_pass(technique, i);
+    obs_ffi::gs_render_start(true);
+
+    obs_ffi::gs_vertex2f(0.0, 0.0);
+    obs_ffi::gs_vertex2f(base_w as f32, 0.0);
+
+    obs_ffi::gs_vertex2f(base_w as f32, 0.0);
+    obs_ffi::gs_vertex2f(base_w as f32, base_h as f32);
+
+    obs_ffi::gs_vertex2f(base_w as f32, base_h as f32);
+    obs_ffi::gs_vertex2f(0.0, base_h as f32);
+
+    obs_ffi::gs_vertex2f(0.0, base_h as f32);
+    obs_ffi::gs_vertex2f(0.0, 0.0);
+
+    obs_ffi::gs_render_stop(obs_ffi::gs_draw_mode_GS_LINES);
+    obs_ffi::gs_technique_end_pass(technique);
+  }
+  obs_ffi::gs_technique_end(technique);
+}
+
 unsafe fn draw_grid_lines(base_w: u32, base_h: u32, grid_type: &str) {
   if grid_type == "none" || grid_type.is_empty() {
     return;
@@ -555,20 +631,7 @@ unsafe fn draw_grid_lines(base_w: u32, base_h: u32, grid_type: &str) {
     obs_ffi::gs_technique_begin_pass(technique, i);
     obs_ffi::gs_render_start(true);
 
-    // 1. Contorno del Canvas
-    obs_ffi::gs_vertex2f(0.0, 0.0);
-    obs_ffi::gs_vertex2f(base_w as f32, 0.0);
-
-    obs_ffi::gs_vertex2f(base_w as f32, 0.0);
-    obs_ffi::gs_vertex2f(base_w as f32, base_h as f32);
-
-    obs_ffi::gs_vertex2f(base_w as f32, base_h as f32);
-    obs_ffi::gs_vertex2f(0.0, base_h as f32);
-
-    obs_ffi::gs_vertex2f(0.0, base_h as f32);
-    obs_ffi::gs_vertex2f(0.0, 0.0);
-
-    // 2. Líneas divisorias internas
+    // Líneas divisorias internas
     let divisions = match grid_type {
       "thirds" => 3,
       "grid10" => 10,
@@ -598,8 +661,15 @@ unsafe fn draw_grid_lines(base_w: u32, base_h: u32, grid_type: &str) {
 }
 
 /// Dibuja la escena actual (lo mismo que ve la grabacion) escalada y
-/// centrada dentro del rectangulo real de la ventana de preview, aplicando zoom,
-/// paneo y cuadrícula de ayuda.
+/// centrada dentro del rectangulo real de la ventana de preview, aplicando
+/// zoom, paneo y cuadricula de ayuda.
+///
+/// IMPORTANTE: esto corre en el thread grafico de libobs. NO debe tomar
+/// CAPTURE_STATE/CONFIG ni ningun lock que el thread de UI tome mientras
+/// llama a libobs -- eso producia el deadlock que congelaba la app entera
+/// (ventana en blanco, "la aplicacion no responde"). Por eso renderiza la
+/// textura principal ya compuesta (obs_render_main_texture, cero locks
+/// nuestros) y lee la seleccion de SELECTION_RECT, que es solo datos.
 extern "C" fn render_preview_callback(_param: *mut c_void, cx: u32, cy: u32) {
   unsafe {
     let (base_w, base_h) = *CANVAS_SIZE.lock().unwrap();
@@ -613,44 +683,30 @@ extern "C" fn render_preview_callback(_param: *mut c_void, cx: u32, cy: u32) {
     let off_x = (cx as i32 - scaled_w) / 2;
     let off_y = (cy as i32 - scaled_h) / 2;
 
-    // Cargar parámetros de transformación y cuadrícula
-    let (zoom, pan_x, pan_y, grid_type) = {
-      let params = PREVIEW_PARAMS.lock().unwrap();
-      (params.zoom, params.pan_x, params.pan_y, params.grid.clone())
-    };
-
-    let half_w = (base_w as f32 / 2.0) / zoom;
-    let half_h = (base_h as f32 / 2.0) / zoom;
-    let left = base_w as f32 / 2.0 - half_w - pan_x;
-    let right = base_w as f32 / 2.0 + half_w - pan_x;
-    let bottom = base_h as f32 / 2.0 - half_h - pan_y;
-    let top = base_h as f32 / 2.0 + half_h - pan_y;
+    let grid_type = PREVIEW_PARAMS.lock().unwrap().grid.clone();
+    let (view_left, view_top, view_w, view_h) = view_rect(base_w, base_h);
 
     obs_ffi::gs_viewport_push();
     obs_ffi::gs_projection_push();
-    obs_ffi::gs_ortho(left, right, bottom, top, -100.0, 100.0);
+    obs_ffi::gs_ortho(view_left, view_left + view_w, view_top, view_top + view_h, -100.0, 100.0);
     obs_ffi::gs_set_viewport(off_x, off_y, scaled_w, scaled_h);
-    let scene_source_ptr = {
-      let guard = crate::CAPTURE_STATE.lock().unwrap();
-      if let Some(state) = &*guard {
-        obs_ffi::obs_scene_get_source(state.scene.0)
-      } else {
-        std::ptr::null_mut()
-      }
-    };
-    if !scene_source_ptr.is_null() {
-      obs_ffi::obs_source_video_render(scene_source_ptr);
-    }
 
-    // Dibujar cuadrícula de guía
+    // La escena esta puesta como output source (canal 0), asi que la textura
+    // principal ya la tiene compuesta -- mismo mecanismo que el preview de
+    // OBS Studio.
+    obs_ffi::obs_render_main_texture();
+
+    // Dibujar el contorno del lienzo (canvas border) siempre visible
+    draw_canvas_border(base_w, base_h);
+
+    // Dibujar cuadricula de guia
     draw_grid_lines(base_w, base_h, &grid_type);
 
-    // Draw overlay selection box
-    let selected = *SELECTED_OVERLAY.lock().unwrap();
-    if let Some(index) = selected {
-      if let Some((ox, oy, ow, oh)) = crate::get_overlay_rect(index) {
-        draw_selection_box(ox, oy, ow, oh, base_h);
-      }
+    // Caja de seleccion del overlay (precalculada por el thread de UI).
+    // handle_size en px de canvas para que se vea ~5px constantes en pantalla.
+    if let Some((ox, oy, ow, oh)) = *SELECTION_RECT.lock().unwrap() {
+      let screen_to_canvas = (view_w / scaled_w.max(1) as f32).max(0.0001);
+      draw_selection_box(ox, oy, ow, oh, 5.0 * screen_to_canvas);
     }
 
     obs_ffi::gs_projection_pop();
@@ -695,7 +751,10 @@ pub unsafe fn create(parent_hwnd: HWND, x: i32, y: i32, w: i32, h: i32) -> Resul
     zsformat: obs_ffi::gs_zstencil_format_GS_ZS_NONE,
     adapter: 0,
   };
-  let display = obs_ffi::obs_display_create(&mut init_data as *const _, 0xFFFF0000);
+  // Color de fondo del display: libobs lo interpreta como 0xAABBGGRR (RGBA
+  // little-endian, R en el byte bajo). Para que contraste con el lienzo negro,
+  // usamos un gris oscuro (#18181b -> 0xFF1B1818):
+  let display = obs_ffi::obs_display_create(&mut init_data as *const _, 0xFF1B1818);
   if display.is_null() {
     DestroyWindow(hwnd);
     return Err("obs_display_create devolvio null (¿ya se inicio libobs?)".into());
