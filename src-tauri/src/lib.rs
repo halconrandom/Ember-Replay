@@ -278,7 +278,65 @@ fn show_status_notification(app: &AppHandle, active: bool) {
     return;
   }
 
-  create_native_overlay_window(app, "status_toast", &route, 24.0, 24.0, 55.0);
+  let main_win = app.get_webview_window("main");
+  let monitor = main_win
+    .as_ref()
+    .and_then(|w| w.current_monitor().ok().flatten());
+
+  let (x, y) = match monitor {
+    Some(m) => {
+      let pos = m.position();
+      let size = m.size();
+      let scale = m.scale_factor();
+      let monitor_x = (pos.x as f64) / scale;
+      let monitor_y = (pos.y as f64) / scale;
+      let monitor_w = (size.width as f64) / scale;
+      let monitor_h = (size.height as f64) / scale;
+
+      let width = 36.0;
+      let height = 36.0;
+      let target_x = monitor_x + monitor_w - width - 15.0;
+      let target_y = monitor_y + monitor_h - height - 55.0;
+      (target_x, target_y)
+    }
+    None => {
+      let (screen_w, screen_h) = primary_monitor_size();
+      let width = 36.0;
+      let height = 36.0;
+      let target_x = (screen_w as f64) - width - 15.0;
+      let target_y = (screen_h as f64) - height - 55.0;
+      (target_x, target_y)
+    }
+  };
+
+  let builder = tauri::WebviewWindowBuilder::new(
+    app,
+    "status_toast",
+    tauri::WebviewUrl::App(route.into())
+  )
+  .title("Ember Status")
+  .inner_size(36.0, 36.0)
+  .position(x, y)
+  .resizable(false)
+  .decorations(false)
+  .transparent(true)
+  .always_on_top(true)
+  .skip_taskbar(true)
+  .shadow(false);
+
+  if let Ok(win) = builder.build() {
+    unsafe {
+      if let Ok(hwnd) = win.hwnd() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+          GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_TRANSPARENT, WS_EX_LAYERED
+        };
+        let raw_hwnd = hwnd.0 as windows_sys::Win32::Foundation::HWND;
+        let ex_style = GetWindowLongW(raw_hwnd, GWL_EXSTYLE);
+        let new_style = (ex_style as u32 | WS_EX_TRANSPARENT | WS_EX_LAYERED) as i32;
+        SetWindowLongW(raw_hwnd, GWL_EXSTYLE, new_style);
+      }
+    }
+  }
 }
 
 /// Resolucion del monitor principal, usada como canvas base de libobs.
