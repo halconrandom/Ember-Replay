@@ -1192,21 +1192,11 @@ unsafe fn ensure_output_started(clip_seconds: i64) -> Result<PathBuf, String> {
     }
   }
 
-  let venc_id = CString::new("obs_nvenc_h264_tex").unwrap();
-  let venc_name = CString::new("Ember Video Encoder").unwrap();
-  let video_encoder =
-    obs_ffi::obs_video_encoder_create(venc_id.as_ptr(), venc_name.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
-  if video_encoder.is_null() {
-    return Err("obs_video_encoder_create('obs_nvenc_h264_tex') devolvio null (¿GPU sin NVENC?)".into());
-  }
-  obs_ffi::obs_encoder_set_video(video_encoder, obs_ffi::obs_get_video());
-
   let aenc_id = CString::new("ffmpeg_aac").unwrap();
   let aenc_name = CString::new("Ember Audio Encoder").unwrap();
   let audio_encoder =
     obs_ffi::obs_audio_encoder_create(aenc_id.as_ptr(), aenc_name.as_ptr(), std::ptr::null_mut(), 0, std::ptr::null_mut());
   if audio_encoder.is_null() {
-    obs_ffi::obs_encoder_release(video_encoder);
     return Err("obs_audio_encoder_create('ffmpeg_aac') devolvio null".into());
   }
   obs_ffi::obs_encoder_set_audio(audio_encoder, obs_ffi::obs_get_audio());
@@ -1236,27 +1226,72 @@ unsafe fn ensure_output_started(clip_seconds: i64) -> Result<PathBuf, String> {
   let output = obs_ffi::obs_output_create(output_id.as_ptr(), output_name.as_ptr(), settings, std::ptr::null_mut());
   obs_ffi::obs_data_release(settings);
   if output.is_null() {
-    obs_ffi::obs_encoder_release(video_encoder);
     obs_ffi::obs_encoder_release(audio_encoder);
     return Err("obs_output_create('replay_buffer') devolvio null".into());
   }
-
-  obs_ffi::obs_output_set_video_encoder(output, video_encoder);
   obs_ffi::obs_output_set_audio_encoder(output, audio_encoder, 0);
 
-  let started = obs_ffi::obs_output_start(output);
-  if !started {
+  // Codificador de video: probamos hardware por vendor en orden de
+  // preferencia y caemos a x264 por software si ninguno funciona. No basta
+  // con que obs_video_encoder_create() no devuelva null -- en encoders "_tex"
+  // (NVENC/AMF/QSV) la sesion real de hardware recien se intenta crear
+  // adentro de obs_output_start(), y si falla ahi libobs muchas veces no deja
+  // un mensaje en last_error (queda "razon desconocida"). Por eso el unico
+  // chequeo confiable es intentar arrancar el output con cada candidato.
+  const VIDEO_ENCODER_CANDIDATES: &[(&str, &str)] = &[
+    ("obs_nvenc_h264_tex", "NVIDIA NVENC"),
+    ("h264_texture_amf", "AMD AMF"),
+    ("obs_qsv11_v2", "Intel QuickSync"),
+    ("obs_x264", "software (x264)"),
+  ];
+
+  let registered = registered_encoder_ids();
+  let mut video_encoder: *mut obs_ffi::obs_encoder_t = std::ptr::null_mut();
+  let mut chosen_label = "";
+  let mut attempt_errors: Vec<String> = Vec::new();
+
+  for (id, label) in VIDEO_ENCODER_CANDIDATES {
+    if !registered.iter().any(|r| r == id) {
+      continue; // este build de libobs no cargo el plugin de este encoder, ni lo intentamos
+    }
+
+    let venc_id = CString::new(*id).unwrap();
+    let venc_name = CString::new("Ember Video Encoder").unwrap();
+    let candidate =
+      obs_ffi::obs_video_encoder_create(venc_id.as_ptr(), venc_name.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
+    if candidate.is_null() {
+      attempt_errors.push(format!("{label} ({id}): obs_video_encoder_create devolvio null"));
+      continue;
+    }
+    obs_ffi::obs_encoder_set_video(candidate, obs_ffi::obs_get_video());
+    obs_ffi::obs_output_set_video_encoder(output, candidate);
+
+    if obs_ffi::obs_output_start(output) {
+      video_encoder = candidate;
+      chosen_label = label;
+      break;
+    }
+
     let err_ptr = obs_ffi::obs_output_get_last_error(output);
     let err = if err_ptr.is_null() {
-      "razon desconocida".to_string()
+      "razon desconocida (probablemente el hardware no soporta este codificador)".to_string()
     } else {
       CStr::from_ptr(err_ptr).to_string_lossy().into_owned()
     };
-    obs_ffi::obs_encoder_release(video_encoder);
+    attempt_errors.push(format!("{label} ({id}): {err}"));
+    obs_ffi::obs_encoder_release(candidate);
+  }
+
+  if video_encoder.is_null() {
     obs_ffi::obs_encoder_release(audio_encoder);
     obs_ffi::obs_output_release(output);
-    return Err(format!("obs_output_start fallo: {err}"));
+    return Err(format!(
+      "No se pudo iniciar la grabacion con ningun codificador de video disponible:\n{}",
+      attempt_errors.join("\n")
+    ));
   }
+
+  log::info!("Grabacion iniciada usando codificador de video: {chosen_label}");
 
   *OUTPUT_STATE.lock().unwrap() = Some(OutputState {
     output: RawPtr(output),
@@ -1266,6 +1301,26 @@ unsafe fn ensure_output_started(clip_seconds: i64) -> Result<PathBuf, String> {
   });
 
   Ok(clips_dir)
+}
+
+/// Lista los IDs de encoder que libobs registro efectivamente en este build
+/// (obs_load_all_modules ya corrio). Sirve para no intentar crear un
+/// encoder de un vendor cuyo plugin ni siquiera cargo (ej. AMF en una PC
+/// sin GPU AMD), evitando ruido y objetos "dummy" que fallan mas adelante.
+unsafe fn registered_encoder_ids() -> Vec<String> {
+  let mut ids = Vec::new();
+  let mut idx: usize = 0;
+  loop {
+    let mut id_ptr: *const std::os::raw::c_char = std::ptr::null();
+    if !obs_ffi::obs_enum_encoder_types(idx, &mut id_ptr as *mut _) {
+      break;
+    }
+    if !id_ptr.is_null() {
+      ids.push(CStr::from_ptr(id_ptr).to_string_lossy().into_owned());
+    }
+    idx += 1;
+  }
+  ids
 }
 
 
