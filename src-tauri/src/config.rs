@@ -124,6 +124,11 @@ pub struct EmberioConfig {
   pub fps: i64,
   #[serde(default)]
   pub overlays: Vec<OverlayConfig>,
+  /// "auto" (prueba NVENC -> AMD AMF -> Intel QSV -> x264 hasta que uno
+  /// arranque) o el id explicito de un encoder (ej. "obs_x264") para forzar
+  /// uno puntual sin fallback automatico.
+  #[serde(default = "default_video_encoder")]
+  pub video_encoder: String,
 }
 
 fn default_clip_seconds() -> i64 {
@@ -144,6 +149,10 @@ fn default_resolution() -> String {
 
 fn default_fps() -> i64 {
   60
+}
+
+fn default_video_encoder() -> String {
+  "auto".to_string()
 }
 
 fn default_audio_sources() -> Vec<AudioSourceConfig> {
@@ -171,6 +180,7 @@ impl Default for EmberioConfig {
       resolution: default_resolution(),
       fps: default_fps(),
       overlays: Vec::new(),
+      video_encoder: default_video_encoder(),
     }
   }
 }

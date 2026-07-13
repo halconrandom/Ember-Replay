@@ -239,9 +239,14 @@ import '../styles/global.css';
 									</select>
 								</div>
 							</div>
-							
+
+							<div>
+								<label for="video-encoder-select" class="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold mb-1.5 block">Codificador de Video</label>
+								<select id="video-encoder-select" class="w-full bg-[#09090b] border border-zinc-700/80 text-zinc-300 text-xs rounded-md px-3 py-2 focus:outline-none focus:border-orange-500/50 transition-colors"></select>
+							</div>
+
 							<div class="bg-zinc-950/40 p-3 rounded-lg border border-zinc-900 text-[10px] text-zinc-500 font-medium">
-								* Nota: Los cambios de tipo y origen de captura se aplican inmediatamente. Los ajustes de FPS y resolución se aplicarán la próxima vez que inicies una grabación.
+								* Nota: Los cambios de tipo y origen de captura se aplican inmediatamente. Los ajustes de FPS, resolución y codificador se aplicarán la próxima vez que inicies una grabación. "Automático" prueba GPU (NVIDIA/AMD/Intel) y cae a software si ninguna funciona.
 							</div>
 						</div>
 					</div>
@@ -415,6 +420,7 @@ import '../styles/global.css';
 				theme: string;
 				resolution: string;
 				fps: number;
+				video_encoder: string;
 			}
 			interface PropertyOption {
 				name: string;
@@ -814,6 +820,9 @@ import '../styles/global.css';
 			});
 			el("fps-select")?.addEventListener("change", async (e) => {
 				await invoke("set_fps", { fps: Number((e.target as HTMLSelectElement).value) });
+			});
+			el("video-encoder-select")?.addEventListener("change", async (e) => {
+				await invoke("set_video_encoder", { encoder: (e.target as HTMLSelectElement).value });
 			});
 
 			// ---------------------------------------------------------------
@@ -1299,6 +1308,9 @@ import '../styles/global.css';
 					captureTypeSelect.value = config.video_source_type || "screen";
 					
 					await updateSourceOptions(captureTypeSelect.value, config.video_source_id);
+
+					const encoders = await invoke<PropertyOption[]>("list_video_encoders");
+					await populateSelect("video-encoder-select", encoders, config.video_encoder || "auto");
 
 					const [outputs, inputs] = await Promise.all([
 						invoke<PropertyOption[]>("list_audio_output_devices"),
