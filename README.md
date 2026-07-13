@@ -28,21 +28,22 @@ Ambos son atajos **globales de Windows** (funcionan aunque Ember no tenga el foc
 - **Audio**: hasta 5 fuentes simultáneas (salida de escritorio y/o micrófonos vía WASAPI), cada una con volumen y mute independiente, pensado para setups tipo Voicemeeter con varios buses virtuales.
 - **Overlays**: imagen, texto o navegador (browser source) superpuestos a la captura, con posición/escala/opacidad ajustables arrastrando directamente sobre el preview en vivo.
 - **Carpeta de clips** y **duración del buffer**.
+- **Codificador de video**: automático (prueba NVIDIA NVENC → AMD AMF → Intel QuickSync → x264 por software, hasta que uno arranque) o uno puntual a elección.
 
 La configuración se persiste en `%APPDATA%\dev.halcondev.emberio\config.json`.
 
 ## Requisitos
 
 - **Windows 10/11** (usa APIs nativas de Win32 para hotkeys globales, captura DXGI/WASAPI y el indicador de estado).
-- **GPU NVIDIA con NVENC** — el encoder de video actual es `obs_nvenc_h264_tex` (H264 vía NVENC). Sin una GPU NVIDIA compatible, la grabación no va a poder arrancar.
+- **GPU** — recomendada una GPU con encoder de hardware (NVIDIA NVENC, AMD AMF o Intel QuickSync) para grabar sin cargar la CPU. Si no hay ninguna disponible, Ember cae automáticamente a codificación por software (x264), más lenta pero funciona en cualquier PC.
 
-## Instalación (alpha)
+## Descargar
 
-1. Descargá/generá el instalador: `ember_1.0.0-alpha.1_x64-setup.exe` (NSIS).
-2. Ejecutalo y seguí el asistente.
-3. Al abrir Ember por primera vez, el indicador de estado (rojo) aparece en la esquina inferior derecha de tu pantalla principal.
+La última build compilada está en [**Releases**](https://github.com/halconrandom/emberio/releases) de este repo: descargá el `.exe` (NSIS) de la release más reciente, ejecutalo y seguí el asistente.
 
 > Es una alpha: puede tener bugs, cambios de comportamiento entre versiones y todavía no hay auto-actualización.
+
+Al abrir Ember por primera vez, el indicador de estado (rojo) aparece en la esquina inferior derecha de tu pantalla principal.
 
 ## Cómo compilarlo vos mismo
 
