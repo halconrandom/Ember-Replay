@@ -85,6 +85,16 @@ static LAST_APPLIED_VIDEO: Mutex<Option<(String, i64)>> = Mutex::new(None);
 const DEFAULT_HOTKEY_VK_F9: i32 = 0x78; // VK_F9
 const DEFAULT_TOGGLE_HOTKEY_VK_F10: i32 = 0x79; // VK_F10
 
+/// Codificadores de video candidatos para grabar, en orden de preferencia
+/// cuando la config esta en "auto": hardware por vendor primero, x264 por
+/// software al final como red de seguridad universal.
+const VIDEO_ENCODER_CANDIDATES: &[(&str, &str)] = &[
+  ("obs_nvenc_h264_tex", "NVIDIA NVENC"),
+  ("h264_texture_amf", "AMD AMF"),
+  ("obs_qsv11_v2", "Intel QuickSync"),
+  ("obs_x264", "Software (x264)"),
+];
+
 struct SendHWND(HWND);
 unsafe impl Send for SendHWND {}
 unsafe impl Sync for SendHWND {}
@@ -1231,31 +1241,37 @@ unsafe fn ensure_output_started(clip_seconds: i64) -> Result<PathBuf, String> {
   }
   obs_ffi::obs_output_set_audio_encoder(output, audio_encoder, 0);
 
-  // Codificador de video: probamos hardware por vendor en orden de
-  // preferencia y caemos a x264 por software si ninguno funciona. No basta
-  // con que obs_video_encoder_create() no devuelva null -- en encoders "_tex"
-  // (NVENC/AMF/QSV) la sesion real de hardware recien se intenta crear
-  // adentro de obs_output_start(), y si falla ahi libobs muchas veces no deja
-  // un mensaje en last_error (queda "razon desconocida"). Por eso el unico
-  // chequeo confiable es intentar arrancar el output con cada candidato.
-  const VIDEO_ENCODER_CANDIDATES: &[(&str, &str)] = &[
-    ("obs_nvenc_h264_tex", "NVIDIA NVENC"),
-    ("h264_texture_amf", "AMD AMF"),
-    ("obs_qsv11_v2", "Intel QuickSync"),
-    ("obs_x264", "software (x264)"),
-  ];
+  // Codificador de video: por defecto ("auto") probamos hardware por vendor
+  // en orden de preferencia y caemos a x264 por software si ninguno
+  // funciona. No basta con que obs_video_encoder_create() no devuelva null
+  // -- en encoders "_tex" (NVENC/AMF/QSV) la sesion real de hardware recien
+  // se intenta crear adentro de obs_output_start(), y si falla ahi libobs
+  // muchas veces no deja un mensaje en last_error (queda "razon
+  // desconocida"). Por eso el unico chequeo confiable es intentar arrancar
+  // el output con cada candidato.
+  //
+  // Si el usuario eligio un encoder puntual en configuraciones, respetamos
+  // esa eleccion (sin fallback automatico a otro): es una eleccion explicita
+  // para forzar rendimiento o depurar, y silenciarla con un fallback la
+  // volveria inutil para ese proposito.
+  let selection = with_config(|c| c.video_encoder.clone());
+  let forced = VIDEO_ENCODER_CANDIDATES.iter().find(|entry| entry.0 == selection);
+  let candidates: Vec<(&str, &str)> = match forced {
+    Some(entry) => vec![*entry],
+    None => VIDEO_ENCODER_CANDIDATES.to_vec(), // "auto" o valor desconocido/viejo -> probamos todos
+  };
 
   let registered = registered_encoder_ids();
   let mut video_encoder: *mut obs_ffi::obs_encoder_t = std::ptr::null_mut();
   let mut chosen_label = "";
   let mut attempt_errors: Vec<String> = Vec::new();
 
-  for (id, label) in VIDEO_ENCODER_CANDIDATES {
+  for (id, label) in candidates {
     if !registered.iter().any(|r| r == id) {
       continue; // este build de libobs no cargo el plugin de este encoder, ni lo intentamos
     }
 
-    let venc_id = CString::new(*id).unwrap();
+    let venc_id = CString::new(id).unwrap();
     let venc_name = CString::new("Ember Video Encoder").unwrap();
     let candidate =
       obs_ffi::obs_video_encoder_create(venc_id.as_ptr(), venc_name.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
@@ -1584,6 +1600,26 @@ fn set_clips_dir(dir: String) -> Result<String, String> {
 #[tauri::command]
 fn get_config() -> config::EmberioConfig {
   with_config(|c| c.clone())
+}
+
+/// Codificadores de video utilizables para grabar en esta PC: "auto" mas
+/// los que libobs realmente registro (ver VIDEO_ENCODER_CANDIDATES). Que un
+/// encoder este registrado no garantiza al 100% que el hardware funcione
+/// (ver ensure_output_started), pero descarta de entrada los vendors que ni
+/// siquiera cargaron su plugin.
+#[tauri::command]
+async fn list_video_encoders() -> Result<Vec<PropertyOption>, String> {
+  unsafe {
+    ensure_obs_platform_initialized()?;
+    let registered = registered_encoder_ids();
+    let mut options = vec![PropertyOption { name: "Automatico (recomendado)".to_string(), value: "auto".to_string() }];
+    for (id, label) in VIDEO_ENCODER_CANDIDATES {
+      if registered.iter().any(|r| r == id) {
+        options.push(PropertyOption { name: label.to_string(), value: id.to_string() });
+      }
+    }
+    Ok(options)
+  }
 }
 
 /// Lista de pantallas disponibles (mismo mecanismo que usa la ventana de
@@ -2226,6 +2262,16 @@ async fn set_resolution(resolution: String) -> Result<(), String> {
   Ok(())
 }
 
+/// "auto" o el id de un encoder puntual (ver VIDEO_ENCODER_CANDIDATES). Si
+/// ya estas grabando no aplica hasta que hagas stop_recording +
+/// start_recording, igual que resolucion/fps.
+#[tauri::command]
+async fn set_video_encoder(encoder: String) -> Result<(), String> {
+  with_config(|c| c.video_encoder = encoder);
+  persist_config();
+  Ok(())
+}
+
 #[tauri::command]
 async fn set_fps(fps: i64) -> Result<(), String> {
   with_config(|c| c.fps = fps);
@@ -2380,6 +2426,8 @@ pub fn run() {
       set_toggle_hotkey,
       set_clips_dir,
       get_config,
+      list_video_encoders,
+      set_video_encoder,
       list_monitors,
       list_audio_output_devices,
       list_audio_input_devices,
