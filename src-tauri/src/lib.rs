@@ -4,17 +4,10 @@ mod preview;
 
 use std::ffi::{c_void, CStr, CString};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock, mpsc};
+use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-  CreateWindowExW, GetMessageW, RegisterClassW, MSG, WM_HOTKEY, WNDCLASSW, WS_POPUP, PostQuitMessage,
-  DefWindowProcW, WM_DESTROY, PostMessageW, WM_USER, TranslateMessage, DispatchMessageW
-};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-  RegisterHotKey, UnregisterHotKey
-};
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 
 /// Wrapper para poder guardar punteros crudos de libobs en un `static`.
 /// Seguro en la practica: libobs es thread-safe para estas operaciones y
@@ -95,114 +88,74 @@ const VIDEO_ENCODER_CANDIDATES: &[(&str, &str)] = &[
   ("obs_x264", "Software (x264)"),
 ];
 
-struct SendHWND(HWND);
-unsafe impl Send for SendHWND {}
-unsafe impl Sync for SendHWND {}
-
-static HOTKEY_TX: Mutex<Option<mpsc::Sender<HotkeyCmd>>> = Mutex::new(None);
-static HOTKEY_HWND: Mutex<Option<SendHWND>> = Mutex::new(None);
-
-enum HotkeyCmd {
-  Register { id: i32, vk_code: i32, ctrl: bool, shift: bool, alt: bool },
+#[derive(Clone, Copy)]
+struct HotkeyBinding {
+  vk_code: i32,
+  ctrl: bool,
+  shift: bool,
+  alt: bool,
 }
 
-unsafe extern "system" fn hotkey_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-  match msg {
-    WM_HOTKEY => {
-      let id = wparam as i32;
-      if id == 1 {
-        tauri::async_runtime::spawn(save_clip_and_notify());
-      } else if id == 2 {
-        tauri::async_runtime::spawn(toggle_recording_and_notify());
-      }
-      0
-    }
-    WM_DESTROY => {
-      PostQuitMessage(0);
-      0
-    }
-    _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-  }
+/// Slot 0 = hotkey de guardar clip (id 1), slot 1 = hotkey de encendido/
+/// apagado (id 2).
+static HOTKEYS: Mutex<[Option<HotkeyBinding>; 2]> = Mutex::new([None, None]);
+
+const VK_SHIFT: i32 = 0x10;
+const VK_CONTROL: i32 = 0x11;
+const VK_MENU: i32 = 0x12; // Alt
+
+unsafe fn key_is_down(vk: i32) -> bool {
+  (GetAsyncKeyState(vk) as u16 & 0x8000) != 0
 }
 
+unsafe fn combo_is_down(b: &HotkeyBinding) -> bool {
+  key_is_down(b.vk_code)
+    && key_is_down(VK_CONTROL) == b.ctrl
+    && key_is_down(VK_SHIFT) == b.shift
+    && key_is_down(VK_MENU) == b.alt
+}
+
+/// Hotkeys globales al estilo libobs: en vez de RegisterHotKey (que depende
+/// de que la cola de mensajes de una ventana reciba WM_HOTKEY -- muchos
+/// juegos en pantalla completa exclusiva, o que capturan input crudo via
+/// DirectInput/RawInput, simplemente nunca lo entregan), sondeamos el
+/// estado fisico del teclado a nivel de OS con GetAsyncKeyState cada 30ms.
+/// Es la misma tecnica que usa libobs (obs-hotkey.c: obs_hotkey_thread +
+/// GetAsyncKeyState en obs-windows.c) y funciona sin importar que ventana
+/// tenga el foco -- incluida una ventana exclusiva de juego.
 fn init_native_hotkey_thread() {
-  let (tx, rx) = mpsc::channel::<HotkeyCmd>();
-  *HOTKEY_TX.lock().unwrap() = Some(tx);
-
-  std::thread::spawn(move || unsafe {
-    let class_name: Vec<u16> = "EmberHotkeyClass\0".encode_utf16().collect();
-    let wc = WNDCLASSW {
-      style: 0,
-      lpfnWndProc: Some(hotkey_wnd_proc),
-      cbClsExtra: 0,
-      cbWndExtra: 0,
-      hInstance: GetModuleHandleW(std::ptr::null()),
-      hIcon: std::ptr::null_mut(),
-      hCursor: std::ptr::null_mut(),
-      hbrBackground: std::ptr::null_mut(),
-      lpszMenuName: std::ptr::null(),
-      lpszClassName: class_name.as_ptr(),
-    };
-    RegisterClassW(&wc);
-
-    let hwnd = CreateWindowExW(
-      0,
-      class_name.as_ptr(),
-      std::ptr::null(),
-      WS_POPUP,
-      0, 0, 0, 0,
-      std::ptr::null_mut(),
-      std::ptr::null_mut(),
-      GetModuleHandleW(std::ptr::null()),
-      std::ptr::null(),
-    );
-
-    if hwnd.is_null() {
-      log::error!("No se pudo crear la ventana oculta para hotkeys");
-      return;
-    }
-
-    *HOTKEY_HWND.lock().unwrap() = Some(SendHWND(hwnd));
-
-    // Despertar la ventana para procesar cualquier comando de hotkey encolado durante el arranque
-    PostMessageW(hwnd, WM_USER, 0, 0);
-
-    let mut msg: MSG = std::mem::zeroed();
-    while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 {
-      if msg.message == WM_USER {
-        while let Ok(cmd) = rx.try_recv() {
-          match cmd {
-            HotkeyCmd::Register { id, vk_code, ctrl, shift, alt } => {
-               UnregisterHotKey(hwnd, id);
-               let mut modifiers = 0x4000; // MOD_NOREPEAT
-               if ctrl { modifiers |= 0x0002; }
-               if shift { modifiers |= 0x0004; }
-               if alt { modifiers |= 0x0001; }
-               if RegisterHotKey(hwnd, id, modifiers, vk_code as u32) == 0 {
-                 log::error!("Fallo RegisterHotKey para id={}, vk={}, mod={}", id, vk_code, modifiers);
-               } else {
-                 log::info!("RegisterHotKey exitoso para id={}, vk={}, mod={}", id, vk_code, modifiers);
-               }
-             }
+  std::thread::spawn(|| {
+    let mut was_down = [false; 2];
+    loop {
+      std::thread::sleep(std::time::Duration::from_millis(30));
+      let bindings = { *HOTKEYS.lock().unwrap() };
+      for (i, binding) in bindings.iter().enumerate() {
+        let down = match binding {
+          Some(b) => unsafe { combo_is_down(b) },
+          None => false,
+        };
+        // Disparo solo en el flanco de bajada (recien presionado), igual
+        // que MOD_NOREPEAT antes -- si no, dispararia en cada tick de 30ms
+        // mientras se mantenga apretada la tecla.
+        if down && !was_down[i] {
+          if i == 0 {
+            tauri::async_runtime::spawn(save_clip_and_notify());
+          } else {
+            tauri::async_runtime::spawn(toggle_recording_and_notify());
           }
         }
-      } else {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+        was_down[i] = down;
       }
     }
   });
 }
 
 fn register_native_hotkey(id: i32, vk_code: i32, ctrl: bool, shift: bool, alt: bool) {
-  if let Some(tx) = &*HOTKEY_TX.lock().unwrap() {
-    tx.send(HotkeyCmd::Register { id, vk_code, ctrl, shift, alt }).ok();
-    unsafe {
-      if let Some(hwnd) = &*HOTKEY_HWND.lock().unwrap() {
-        PostMessageW(hwnd.0, WM_USER, 0, 0);
-      }
-    }
+  let idx = (id - 1) as usize;
+  if idx >= 2 {
+    return;
   }
+  HOTKEYS.lock().unwrap()[idx] = Some(HotkeyBinding { vk_code, ctrl, shift, alt });
 }
 
 #[link(name = "user32")]
