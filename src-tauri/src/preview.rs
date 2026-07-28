@@ -11,8 +11,8 @@ use windows_sys::Win32::Foundation::{HWND, POINT};
 use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-  CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
-  WNDCLASSW, WS_POPUP, WS_VISIBLE, CS_DBLCLKS,
+  CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
+  SWP_NOZORDER, SW_HIDE, SW_SHOW, WNDCLASSW, WS_POPUP, WS_VISIBLE, CS_DBLCLKS,
 };
 
 /// Parámetros de vista y cuadrícula del preview.
@@ -745,6 +745,15 @@ pub unsafe fn resize(state: &PreviewState, parent_hwnd: HWND, x: i32, y: i32, w:
   ClientToScreen(parent_hwnd, &mut pt);
   SetWindowPos(state.hwnd, std::ptr::null_mut(), pt.x, pt.y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
   obs_ffi::obs_display_resize(state.display, w as u32, h as u32);
+}
+
+/// Oculta/muestra la ventana nativa del preview sin destruir el
+/// `obs_display` -- se usa para que el preview siga a la ventana principal
+/// cuando se oculta/reaparece (bandeja del sistema), ya que al ser una
+/// ventana "owned" (WS_POPUP con parent), Windows NO la oculta sola cuando
+/// se oculta la ventana dueña (eso solo pasa con WS_CHILD de verdad).
+pub unsafe fn set_visible(state: &PreviewState, visible: bool) {
+  ShowWindow(state.hwnd, if visible { SW_SHOW } else { SW_HIDE });
 }
 
 pub unsafe fn destroy(state: PreviewState) {
