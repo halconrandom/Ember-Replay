@@ -39,7 +39,7 @@ La configuración se persiste en `%APPDATA%\dev.halcondev.emberio\config.json`.
 
 ## Descargar
 
-La última build compilada está en [**Releases**](https://github.com/halconrandom/emberio/releases) de este repo: descarga el `.exe` (NSIS) de la release más reciente, ejecútalo y sigue el asistente.
+La última build compilada está en [**Releases**](https://github.com/halconrandom/Ember-Replay/releases) de este repo: descarga el `.exe` (NSIS) de la release más reciente, ejecútalo y sigue el asistente.
 
 > Es una alpha: puede tener bugs, cambios de comportamiento entre versiones y todavía no hay auto-actualización.
 
