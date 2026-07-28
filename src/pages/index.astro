@@ -9,7 +9,7 @@ import '../styles/global.css';
 		<link rel="icon" href="/favicon.ico" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="generator" content={Astro.generator} />
-		<title>Ember</title>
+		<title>Ember Replay</title>
 	</head>
 	<body class="h-full m-0 overflow-hidden select-none font-sans text-zinc-300 antialiased bg-[#09090b]">
 		<div class="w-screen h-screen flex flex-col overflow-hidden">
@@ -21,7 +21,7 @@ import '../styles/global.css';
 			>
 				<div class="flex items-center gap-2 pointer-events-none">
 					<img src="/logo.svg" alt="" width="16" height="16" class="rounded-sm" />
-					<span class="font-semibold text-zinc-200 text-xs tracking-wide">Ember <span class="text-zinc-600 font-normal">| Studio Capture</span></span>
+					<span class="font-semibold text-zinc-200 text-xs tracking-wide">Ember Replay <span class="text-zinc-600 font-normal">| Studio Capture</span></span>
 				</div>
 				<div class="flex items-center gap-4 text-zinc-500">
 					<button id="win-minimize" aria-label="Minimizar" class="hover:text-zinc-300 cursor-pointer transition-colors leading-none">
@@ -288,7 +288,7 @@ import '../styles/global.css';
 
 			<!-- Status Bar Footer -->
 			<div class="h-5 bg-[#060608] border-t border-zinc-900 flex items-center justify-between px-4 text-[10px] text-zinc-650 shrink-0 select-none">
-				<span>Ember v0.1.0</span>
+				<span id="app-version-label">Ember Replay</span>
 				<span>Developed by halcon.dev</span>
 			</div>
 		</div>
@@ -378,6 +378,7 @@ import '../styles/global.css';
 			import { listen } from "@tauri-apps/api/event";
 			import { open } from "@tauri-apps/plugin-dialog";
 			import { getCurrentWindow } from "@tauri-apps/api/window";
+			import { getVersion } from "@tauri-apps/api/app";
 
 			// ---------------------------------------------------------------
 			// Tipos
@@ -1353,6 +1354,10 @@ import '../styles/global.css';
 			}
 
 			loadConfig();
+
+			getVersion()
+				.then((version) => setText("app-version-label", `Ember Replay v${version}`))
+				.catch(() => {});
 		</script>
 	</body>
 </html>
