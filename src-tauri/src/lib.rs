@@ -2350,6 +2350,11 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
               let _ = window.show();
               let _ = window.set_focus();
+              unsafe {
+                if let Some(state) = &*PREVIEW_STATE.lock().unwrap() {
+                  preview::set_visible(state, true);
+                }
+              }
             }
           }
           "quit" => {
@@ -2368,6 +2373,14 @@ pub fn run() {
       if let WindowEvent::CloseRequested { api, .. } = event {
         api.prevent_close();
         let _ = window.hide();
+        // El preview es una ventana "owned" (WS_POPUP) aparte del webview --
+        // ocultar la ventana principal no la oculta sola, asi que quedaba
+        // pegada en pantalla. La escondemos a mano junto con la ventana.
+        unsafe {
+          if let Some(state) = &*PREVIEW_STATE.lock().unwrap() {
+            preview::set_visible(state, false);
+          }
+        }
       }
     })
     .invoke_handler(tauri::generate_handler![
