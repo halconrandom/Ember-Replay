@@ -64,9 +64,15 @@ pub fn emit_event<S: serde::Serialize + Clone>(event: &str, payload: S) {
 }
 static CONFIG: Mutex<Option<config::EmberioConfig>> = Mutex::new(None);
 static CONFIG_SAVE_TX: OnceLock<std::sync::mpsc::Sender<config::EmberioConfig>> = OnceLock::new();
-/// Nivel de audio en vivo (0.0..=1.0) por indice de fuente, actualizado por
-/// los callbacks de volmeter y emitido periodicamente al frontend.
+/// Pico instantaneo crudo (dB, sin suavizar) por indice de fuente --
+/// actualizado en cada callback del volmeter de libobs. Ver
+/// AUDIO_LEVELS_DISPLAY_DB para el valor que realmente se manda al frontend.
 static AUDIO_LEVELS: Mutex<Vec<f32>> = Mutex::new(Vec::new());
+/// Nivel que efectivamente ve el frontend: sigue al pico crudo con la misma
+/// balistica que usa el medidor real de OBS Studio (ataque instantaneo,
+/// caida gradual en dB/seg -- ver AUDIO_METER_DECAY_DB_PER_SEC), para que la
+/// barra se pueda leer en vez de parpadear con cada buffer de audio.
+static AUDIO_LEVELS_DISPLAY_DB: Mutex<Vec<f32>> = Mutex::new(Vec::new());
 static OBS_INIT_LOCK: Mutex<()> = Mutex::new(());
 /// (resolucion, fps) que ya estan aplicados en libobs. obs_reset_video /
 /// obs_reset_audio son un teardown pesado de todo el pipeline -- solo hay
@@ -747,8 +753,21 @@ unsafe fn single_string_settings(key: &str, value: &Option<String>) -> *mut obs_
 /// varios buses virtuales.
 const MAX_AUDIO_SOURCES: usize = 5;
 
-/// Convierte el dB que reporta el volmeter de OBS a un 0.0..=1.0 para la UI
-/// (rango estandar de VU meter: -60dB = silencio, 0dB = full scale).
+/// MAX_AUDIO_CHANNELS de libobs (media-io/audio-io.h) -- tamano fijo de los
+/// arrays que manda obs_volmeter_updated_t, uno por canal.
+const AUDIO_METER_MAX_CHANNELS: usize = 8;
+/// Piso del medidor: -60dB se pinta como silencio total, igual que el rango
+/// estandar de un VU meter (y el mismo piso que usa el widget de OBS Studio).
+const AUDIO_METER_FLOOR_DB: f32 = -60.0;
+/// Ritmo de caida del medidor, calcado del real de OBS Studio
+/// (frontend/components/VolumeMeter.cpp: peakDecayRate = 20dB / 1.7s). Sin
+/// esto la barra pega saltos con cada buffer de audio (~cada 10-20ms) y es
+/// imposible leerla o comparar dos pistas a ojo -- el "picoteo" que se
+/// reportaba. Con decay, sube al instante (ataque) pero baja gradual.
+const AUDIO_METER_DECAY_DB_PER_SEC: f32 = 20.0 / 1.7;
+
+/// Guarda el pico crudo (dB) de esta fuente. El suavizado con balistica pasa
+/// aparte, en el emisor periodico -- ver AUDIO_LEVELS_DISPLAY_DB.
 extern "C" fn volmeter_callback(
   param: *mut c_void,
   _magnitude: *const f32,
@@ -759,11 +778,19 @@ extern "C" fn volmeter_callback(
   if peak.is_null() {
     return;
   }
-  let db = unsafe { *peak };
-  let normalized = if db.is_finite() { ((db + 60.0) / 60.0).clamp(0.0, 1.0) } else { 0.0 };
-  if let Ok(mut levels) = AUDIO_LEVELS.lock() {
-    if index < levels.len() {
-      levels[index] = normalized;
+  // "peak" trae un valor en dB por canal (MAX_AUDIO_CHANNELS de ancho; los
+  // canales sin usar quedan en -infinito). Tomamos el mas fuerte de todos --
+  // leer solo el canal 0 se perdia contenido si el audio venia mas fuerte
+  // por el otro canal en fuentes estereo.
+  let loudest_db = unsafe { std::slice::from_raw_parts(peak, AUDIO_METER_MAX_CHANNELS) }
+    .iter()
+    .copied()
+    .filter(|v| v.is_finite())
+    .fold(f32::NEG_INFINITY, f32::max);
+  let db = if loudest_db.is_finite() { loudest_db } else { AUDIO_METER_FLOOR_DB };
+  if let Ok(mut peaks) = AUDIO_LEVELS.lock() {
+    if index < peaks.len() {
+      peaks[index] = db.max(AUDIO_METER_FLOOR_DB);
     }
   }
 }
@@ -890,7 +917,8 @@ unsafe fn ensure_capture_started() -> Result<(), String> {
     }
   }
 
-  *AUDIO_LEVELS.lock().unwrap() = vec![0.0; audio_sources.len()];
+  *AUDIO_LEVELS.lock().unwrap() = vec![AUDIO_METER_FLOOR_DB; audio_sources.len()];
+  *AUDIO_LEVELS_DISPLAY_DB.lock().unwrap() = vec![AUDIO_METER_FLOOR_DB; audio_sources.len()];
 
   // 6. Configurar salida de video del preview al output global de libobs
   obs_ffi::obs_set_output_source(0, scene_source);
@@ -2314,14 +2342,40 @@ pub fn run() {
         }
       });
 
-      // Emisor periodico de niveles de audio para el mixer en vivo -- lee
-      // AUDIO_LEVELS (que van llenando los callbacks de volmeter) y la
-      // manda al frontend. Corre siempre; si no hay fuentes activas manda
-      // un array vacio y no hace nada.
+      // Emisor periodico de niveles de audio para el mixer en vivo -- lee los
+      // picos crudos (AUDIO_LEVELS) que van llenando los callbacks de
+      // volmeter, les aplica la misma balistica de ataque/caida que el
+      // medidor real de OBS Studio (sube al toque, baja a
+      // AUDIO_METER_DECAY_DB_PER_SEC), y manda el resultado ya normalizado a
+      // 0.0..=1.0. A ~30fps (33ms) para que se vea fluido en vez de a los
+      // saltos. Corre siempre; si no hay fuentes activas manda un array
+      // vacio y no hace nada.
       tauri::async_runtime::spawn(async {
+        let mut last_tick = std::time::Instant::now();
         loop {
-          tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-          let levels = AUDIO_LEVELS.lock().unwrap().clone();
+          tokio::time::sleep(std::time::Duration::from_millis(33)).await;
+          let now = std::time::Instant::now();
+          let elapsed_sec = (now - last_tick).as_secs_f32();
+          last_tick = now;
+
+          let raw_peaks_db = AUDIO_LEVELS.lock().unwrap().clone();
+          let mut display_db = AUDIO_LEVELS_DISPLAY_DB.lock().unwrap();
+          if display_db.len() != raw_peaks_db.len() {
+            *display_db = vec![AUDIO_METER_FLOOR_DB; raw_peaks_db.len()];
+          }
+          let decay = AUDIO_METER_DECAY_DB_PER_SEC * elapsed_sec;
+          let levels: Vec<f32> = raw_peaks_db
+            .iter()
+            .zip(display_db.iter_mut())
+            .map(|(&raw_db, disp_db)| {
+              // Ataque instantaneo si el pico nuevo es mas fuerte; si no,
+              // cae gradual pero nunca por debajo del pico crudo actual.
+              *disp_db = if raw_db >= *disp_db { raw_db } else { (*disp_db - decay).max(raw_db) };
+              ((*disp_db - AUDIO_METER_FLOOR_DB) / -AUDIO_METER_FLOOR_DB).clamp(0.0, 1.0)
+            })
+            .collect();
+          drop(display_db);
+
           if let Some(app) = APP_HANDLE.get() {
             let _ = app.emit("audio-levels", levels);
           }
