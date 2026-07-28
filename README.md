@@ -1,4 +1,4 @@
-# Ember — Alpha 1.0.0-alpha.2
+# Ember — Alpha 1.0.0-alpha.3
 
 Ember es una app de escritorio para Windows que graba tu pantalla en segundo plano y te deja guardar los últimos segundos de juego/stream con un atajo de teclado, tipo "Shadowplay" pero propio. Corre sobre [Tauri](https://tauri.app) (Rust + Astro) con [libobs](https://github.com/obsproject/obs-studio) (el motor de OBS Studio) vendoreado como submódulo para capturar video/audio y codificar los clips.
 
