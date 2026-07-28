@@ -161,11 +161,10 @@ import '../styles/global.css';
 
 							<button id="save-clip" class="w-full py-1.5 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/20 hover:border-orange-500/40 rounded-lg text-xs font-semibold text-orange-400 flex items-center justify-center gap-2 transition-all cursor-pointer">
 								<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
-								Guardar Clip (F9)
+								Guardar Clip (<span id="save-clip-hotkey-label">F9</span>)
 							</button>
 
 							<p id="save-clip-status" class="text-center text-[10px] text-zinc-500 font-mono min-h-[1.4em] break-words px-1 bg-zinc-950/40 rounded py-0.5 border border-zinc-900/50"></p>
-							<div class="hidden"><span id="hotkey-label"></span></div>
 						</div>
 
 						<!-- Panel Mezclador de Audio -->
@@ -700,9 +699,34 @@ import '../styles/global.css';
 			// ---------------------------------------------------------------
 			// Hotkey de guardado
 			// ---------------------------------------------------------------
+			// Teclas que son puramente modificadoras -- nunca deben quedar como
+			// la "tecla principal" de un combo (si el usuario quiere Alt+algo,
+			// el primer keydown que vemos es el de Alt solo, y hay que seguir
+			// esperando a la tecla real en vez de cerrar la captura ahi mismo).
+			const MODIFIER_VK_CODES = new Set([16, 17, 18, 91, 92, 93]); // Shift, Ctrl, Alt, Win, Win, Menu
+
+			const VK_NAMES: Record<number, string> = {
+				8: "Backspace", 9: "Tab", 13: "Enter", 19: "Pause", 20: "CapsLock", 27: "Esc",
+				32: "Space", 33: "PageUp", 34: "PageDown", 35: "End", 36: "Home",
+				37: "Left", 38: "Up", 39: "Right", 40: "Down", 45: "Insert", 46: "Delete",
+				144: "NumLock", 145: "ScrollLock",
+				186: ";", 187: "=", 188: ",", 189: "-", 190: ".", 191: "/", 192: "`",
+				219: "[", 220: "\\", 221: "]", 222: "'",
+				96: "Num0", 97: "Num1", 98: "Num2", 99: "Num3", 100: "Num4",
+				101: "Num5", 102: "Num6", 103: "Num7", 104: "Num8", 105: "Num9",
+				106: "Num*", 107: "Num+", 109: "Num-", 110: "Num.", 111: "Num/",
+			};
+			for (let i = 0; i <= 9; i++) VK_NAMES[48 + i] = String(i);
+			for (let i = 0; i < 26; i++) VK_NAMES[65 + i] = String.fromCharCode(65 + i);
+			for (let i = 1; i <= 24; i++) VK_NAMES[111 + i] = `F${i}`;
+
+			function keyName(vkCode: number): string {
+				return VK_NAMES[vkCode] ?? `Tecla ${vkCode}`;
+			}
+
 			function describeHotkey(h: HotkeyConfig | null, defaultKey = "F9"): string {
 				if (!h) return defaultKey;
-				return `${h.ctrl ? "Ctrl+" : ""}${h.shift ? "Shift+" : ""}${h.alt ? "Alt+" : ""}vk${h.vk_code}`;
+				return `${h.ctrl ? "Ctrl+" : ""}${h.shift ? "Shift+" : ""}${h.alt ? "Alt+" : ""}${keyName(h.vk_code)}`;
 			}
 
 			el("change-hotkey")?.addEventListener("click", () => {
@@ -712,11 +736,13 @@ import '../styles/global.css';
 
 				const onKeyDown = async (e: KeyboardEvent) => {
 					e.preventDefault();
+					if (MODIFIER_VK_CODES.has(e.keyCode)) return; // seguir esperando la tecla real
 					window.removeEventListener("keydown", onKeyDown, true);
 					try {
 						await invoke<string>("set_save_hotkey", { vkCode: e.keyCode, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey });
 						const combo = describeHotkey({ vk_code: e.keyCode, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey }, "F9");
 						kbd.textContent = combo;
+						setText("save-clip-hotkey-label", combo);
 					} catch (err) {
 						kbd.textContent = original;
 						setText("save-clip-status", `Error: ${err}`);
@@ -732,6 +758,7 @@ import '../styles/global.css';
 
 				const onKeyDown = async (e: KeyboardEvent) => {
 					e.preventDefault();
+					if (MODIFIER_VK_CODES.has(e.keyCode)) return; // seguir esperando la tecla real
 					window.removeEventListener("keydown", onKeyDown, true);
 					try {
 						await invoke<string>("set_toggle_hotkey", { vkCode: e.keyCode, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey });
@@ -1289,6 +1316,7 @@ import '../styles/global.css';
 
 				const hotkeyDesc = describeHotkey(config.hotkey, "F9");
 				setText("hotkey-kbd", hotkeyDesc);
+				setText("save-clip-hotkey-label", hotkeyDesc);
 
 				const toggleHotkeyDesc = describeHotkey(config.hotkey_toggle, "F10");
 				setText("hotkey-toggle-kbd", toggleHotkeyDesc);
