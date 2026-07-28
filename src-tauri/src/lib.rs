@@ -327,7 +327,7 @@ fn create_native_overlay_window(
     window_id,
     tauri::WebviewUrl::App(route.into())
   )
-  .title("Ember Overlay")
+  .title("Ember Replay Overlay")
   .inner_size(width, height)
   // Ver show_status_notification: sin min_inner_size Windows clampea al
   // minimo de tracking (~136px) y la ventana desborda el borde del monitor.
@@ -411,7 +411,7 @@ fn show_status_notification(app: &AppHandle, active: bool) {
     "status_toast",
     tauri::WebviewUrl::App(route.into())
   )
-  .title("Ember Status")
+  .title("Ember Replay Status")
   .inner_size(36.0, 36.0)
   // Sin esto Windows clampea la ventana al minimo de tracking del sistema
   // (~136px de ancho): el calculo de esquina asume 36px y la ventana
@@ -2382,7 +2382,7 @@ pub fn run() {
         }
       });
 
-      let show_item = MenuItem::with_id(app, "show", "Mostrar Ember", true, None::<&str>)?;
+      let show_item = MenuItem::with_id(app, "show", "Mostrar Ember Replay", true, None::<&str>)?;
       let quit_item = MenuItem::with_id(app, "quit", "Salir (corta la grabacion)", true, None::<&str>)?;
       let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
@@ -2398,7 +2398,7 @@ pub fn run() {
         .icon(icon)
         .menu(&menu)
         .show_menu_on_left_click(true)
-        .tooltip("Ember")
+        .tooltip("Ember Replay")
         .on_menu_event(|app, event| match event.id.as_ref() {
           "show" => {
             if let Some(window) = app.get_webview_window("main") {
