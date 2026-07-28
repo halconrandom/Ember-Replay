@@ -6,8 +6,8 @@ Este documento describe **cómo funciona la alpha actual**, no el historial de d
 
 ## Qué hace
 
-- Graba en un **buffer circular** (replay buffer) todo el tiempo en segundo plano, sin generar archivos hasta que vos decidís guardar algo.
-- Con un atajo global guardás los últimos N segundos (configurable, 60s por defecto) como un `.mp4`.
+- Graba en un **buffer circular** (replay buffer) todo el tiempo en segundo plano, sin generar archivos hasta que decidas guardar algo.
+- Con un atajo global se guardan los últimos N segundos (configurable, 60s por defecto) como un `.mp4`.
 - Un indicador circular permanente en la esquina inferior derecha del monitor que estás capturando te muestra el estado: **rojo** = no está grabando, **verde** = grabando.
 - Todo corre desde la bandeja del sistema — cerrar la ventana la oculta, no mata el proceso ni corta la grabación.
 
@@ -39,13 +39,13 @@ La configuración se persiste en `%APPDATA%\dev.halcondev.emberio\config.json`.
 
 ## Descargar
 
-La última build compilada está en [**Releases**](https://github.com/halconrandom/emberio/releases) de este repo: descargá el `.exe` (NSIS) de la release más reciente, ejecutalo y seguí el asistente.
+La última build compilada está en [**Releases**](https://github.com/halconrandom/emberio/releases) de este repo: descarga el `.exe` (NSIS) de la release más reciente, ejecútalo y sigue el asistente.
 
 > Es una alpha: puede tener bugs, cambios de comportamiento entre versiones y todavía no hay auto-actualización.
 
 Al abrir Ember por primera vez, el indicador de estado (rojo) aparece en la esquina inferior derecha de tu pantalla principal.
 
-## Cómo compilarlo vos mismo
+## Cómo compilarlo manualmente
 
 ```sh
 npm install
@@ -64,3 +64,9 @@ npm run tauri dev
 - **Frontend**: [Astro](https://docs.astro.build) + Tailwind, empaquetado como vistas nativas de Tauri (ventana principal + overlays de preview/toast/indicador de estado).
 - **Backend**: Rust (`src-tauri/`), con bindings propios a libobs generados vía `bindgen` (`src-tauri/build.rs`).
 - **Motor de captura/codificación**: libobs vendoreado en `vendor/obs-studio` (submódulo git), compilado aparte y empaquetado junto al ejecutable.
+
+## Agradecimientos
+
+Ember no existiría sin [OBS Studio](https://obsproject.com) y la decisión del OBS Project de liberar su motor de captura y codificación ([libobs](https://github.com/obsproject/obs-studio)) como código abierto. Gracias a todo su equipo por ese trabajo y por dejarlo disponible para que otros lo estudiemos y construyamos sobre él.
+
+Para que quede claro y de forma atribuible: el objetivo de este proyecto **no es crear un reemplazo de OBS** ni competir con él. Es un ejercicio personal para entender cómo funciona por dentro un motor de captura y codificación de video, y a partir de eso armar una app propia, simple y a medida, pensada para mi uso y el de mis amigos.
