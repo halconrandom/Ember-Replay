@@ -1,0 +1,8 @@
+@import "tailwindcss";
+
+/* Tailwind v4 auto-detecta que archivos escanear caminando el repo, pero
+   vendor/obs-studio (el vendor de OBS, cientos de miles de archivos) vive
+   en este mismo repo y lo confunde/cuelga. Restringimos el escaneo a
+   nuestro propio codigo. */
+@source "../pages/**/*.astro";
+@source "../components/**/*.astro";

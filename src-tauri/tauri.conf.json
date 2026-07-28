@@ -1,22 +1,26 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "emberio",
-  "version": "0.1.0",
+  "productName": "ember",
+  "version": "1.0.0-alpha.5",
   "identifier": "dev.halcondev.emberio",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:4321",
+    "devUrl": "http://localhost:4322",
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
   },
   "app": {
     "windows": [
       {
-        "title": "Emberio",
-        "width": 800,
-        "height": 600,
+        "title": "Ember",
+        "width": 1100,
+        "height": 700,
+        "minWidth": 860,
+        "minHeight": 580,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": false
       }
     ],
     "security": {
@@ -25,7 +29,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -33,6 +37,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "windows": {
+      "nsis": {
+        "installerHooks": "nsis-hooks.nsh"
+      }
+    },
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }

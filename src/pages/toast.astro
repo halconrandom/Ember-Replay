@@ -1,0 +1,70 @@
+---
+import '../styles/global.css';
+---
+
+<html lang="es" class="bg-transparent h-full select-none overflow-hidden">
+	<head>
+		<meta charset="utf-8" />
+		<title>Ember Notification</title>
+	</head>
+	<body class="bg-transparent m-0 h-full w-full flex items-center justify-end pr-4">
+		<!-- Toast Notification Card -->
+		<div id="toast-card" class="hidden bg-zinc-950/90 border border-zinc-800/85 rounded-xl p-3 flex items-center gap-3 shadow-2xl w-[260px] translate-x-[300px] opacity-0 transition-all duration-300 backdrop-blur-md">
+			<div class="w-8 h-8 rounded-lg bg-orange-600/20 border border-orange-500/30 flex items-center justify-center shrink-0">
+				<!-- Sparkles icon / clip icon -->
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#e05a10" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.886L4.2 9l5.886 1.912L12 16.8l1.912-5.886L19.8 9l-5.886-1.912Z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 19h4"/><path d="M17 3h4"/></svg>
+			</div>
+			<div class="flex-1 min-w-0">
+				<h4 class="text-[11px] font-bold text-zinc-100 uppercase tracking-wider">Clip Guardado</h4>
+				<p id="toast-desc" class="text-[10px] text-zinc-400 mt-0.5 truncate">¡Se ha capturado el clip!</p>
+			</div>
+		</div>
+
+		<script>
+			import { listen } from "@tauri-apps/api/event";
+			import { getCurrentWindow } from "@tauri-apps/api/window";
+
+			const win = getCurrentWindow();
+			const card = document.getElementById("toast-card")!;
+			const desc = document.getElementById("toast-desc")!;
+			let hideTimeout: number;
+
+			function triggerToast(seconds: number) {
+				desc.textContent = `Clip de ${seconds} segundos guardado.`;
+
+				// Reiniciar animaciones y mostrar
+				clearTimeout(hideTimeout);
+				card.classList.remove("hidden");
+				
+				// Force reflow to restart animation transition
+				void card.offsetWidth;
+
+				// Slide in
+				card.classList.remove("translate-x-[300px]", "opacity-0");
+				card.classList.add("translate-x-0", "opacity-100");
+
+				// Programar ocultacion
+				hideTimeout = window.setTimeout(() => {
+					// Slide out
+					card.classList.remove("translate-x-0", "opacity-100");
+					card.classList.add("translate-x-[300px]", "opacity-0");
+
+					setTimeout(() => {
+						card.classList.add("hidden");
+					}, 300);
+				}, 4000);
+			}
+
+			// Verificar parametros de carga
+			const params = new URLSearchParams(window.location.search);
+			const timeParam = params.get("time");
+			if (timeParam !== null) {
+				triggerToast(Number(timeParam));
+			}
+
+			listen<number>("show-toast", (event) => {
+				triggerToast(event.payload);
+			});
+		</script>
+	</body>
+</html>
